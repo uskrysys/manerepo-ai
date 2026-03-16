@@ -1,0 +1,6 @@
+streamlit
+pandas
+plotly
+fpdf2
+supabase
+python-dotenv
