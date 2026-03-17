@@ -22,6 +22,13 @@ except ImportError:
 # --- 1. ページ設定 ---
 st.set_page_config(page_title="マネレポ AI 財テクくん", layout="wide", page_icon="💰")
 
+# --- 定数定義 ---
+CURRENCY = "円"
+UNIT_ASSET = "円"
+UNIT_COUNT = "件"
+ERROR_DATA_MISSING = "データがありません。入力を開始してください。"
+
+
 # --- 2. CSSデザイン（プレミアムテーマ） ---
 st.markdown("""
 <style>
@@ -210,9 +217,135 @@ h3 { font-size: 18px !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. データの読み込み (Supabase ハイブリッド対応) ---
 FILENAME = "kakeibo_data_v2.csv"
-USER_ID = "local_user_001" # ログイン未実装時のデフォルトID
+# --- ユーザー属性・ステート管理 ---
+if "user_id" not in st.session_state:
+    st.session_state.user_id = "local_user_001"
+USER_ID = st.session_state.user_id
+
+if "business_type" not in st.session_state:
+    st.session_state.business_type = "給与所得者"
+
+if "family_info" not in st.session_state:
+    st.session_state.family_info = {
+        "num_children": 0,
+        "child_grades": []
+    }
+
+if "life_events" not in st.session_state:
+    st.session_state.life_events = pd.DataFrame(columns=["年", "年齢", "イベント名", "金額"])
+
+if "sim_params" not in st.session_state:
+    st.session_state.sim_params = {
+        "years": 10,
+        "rate": 3.0,
+        "inflation": 2.0,
+        "use_tax": False
+    }
+
+# 属性に応じたラベル切り替え関数
+def get_label(key):
+    is_biz = st.session_state.business_type == "個人事業主"
+    labels = {
+        "income": "売上" if is_biz else "収入",
+        "income_all": "累計売上" if is_biz else "累計収入",
+        "expense": "経費" if is_biz else "支出",
+        "balance": "事業収支" if is_biz else "収支バランス",
+    }
+    return labels.get(key, key)
+
+# --- レジリエンス（復旧力）管理 ---
+if "is_synced" not in st.session_state:
+    st.session_state.is_synced = True
+
+def handle_save_error(e):
+    st.session_state.is_synced = False
+    st.sidebar.error(f"⚠️ サーバー保存に失敗しました。ローカルに一時保存します。再接続時に同期を試みます。")
+
+# --- ライフイベント・税金計算用ロジック ---
+def generate_education_events(num_children, child_grades):
+    events = []
+    this_year = datetime.date.today().year
+    
+    # 学年(String)から現在の年齢(Int)を推測する概算ロジック
+    grade_map = {
+        "未就学": 4, "小1": 6, "小2": 7, "小3": 8, "小4": 9, "小5": 10, "小6": 11,
+        "中1": 12, "中2": 13, "中3": 14, "高1": 15, "高2": 16, "高3": 17,
+        "大1": 18, "大2": 19, "大3": 20, "大4": 21
+    }
+    
+    for i in range(num_children):
+        grade = child_grades[i] if i < len(child_grades) else "未就学"
+        current_age = grade_map.get(grade, 4)
+        
+        child_label = f"第{i+1}子"
+        # ライフイベントのポイント: 13(中校入学), 16(高校入学), 19(大学入学)
+        milestones = [
+            (6, "小学校入学", 200000), 
+            (12, "中学校入学", 300000), 
+            (15, "高校入学", 500000), 
+            (18, "大学入学", 1500000)
+        ]
+        
+        for m_age, m_name, m_cost in milestones:
+            years_later = m_age - current_age
+            if years_later >= 0:
+                events.append({
+                    "年": this_year + years_later,
+                    "年齢": m_age,
+                    "イベント名": f"{child_label} {m_name}",
+                    "金額": m_cost
+                })
+    return pd.DataFrame(events).sort_values("年")
+
+def calculate_approx_tax(income, business_type):
+    """
+    超概算の税金計算。所得税+住民税を合計約20%〜30%とする簡易モデル。
+    """
+    taxable_income = max(0, income - 480000) # 基礎控除 48万円
+    if business_type == "個人事業主":
+        taxable_income = max(0, taxable_income - 650000) # 青色申告特別控除 65万円
+    
+    # 簡易累進課税
+    if taxable_income < 3000000:
+        tax_rate = 0.15 # 所得税5% + 住民税10%
+    elif taxable_income < 7000000:
+        tax_rate = 0.25 # 所得税10〜20% + 住民税10%
+    else:
+        tax_rate = 0.35
+    
+    tax_amount = int(taxable_income * tax_rate)
+    return tax_amount, taxable_income
+
+# --- 前月データからの固定費コピーロジック ---
+def register_fixed_costs_from_prev_month(df, user_id, current_month):
+    last_month = (current_month - datetime.timedelta(days=1)).replace(day=1)
+    # 前月の「固定費」に分類される支出を取得
+    prev_month_df = df[(df["user_id"] == user_id) & (df["日付"].apply(lambda x: x.year == last_month.year and x.month == last_month.month))]
+    # 固定費マスターに含まれるカテゴリのみ
+    fixed_cats = [item for sublist in EXPENSE_MASTER["固定費"] for item in sublist] if isinstance(EXPENSE_MASTER["固定費"], list) else EXPENSE_MASTER["固定費"]
+    
+    prev_fixed_df = prev_month_df[prev_month_df["カテゴリー"].isin(fixed_cats)]
+    
+    current_month_df = df[(df["user_id"] == user_id) & (df["日付"].apply(lambda x: x.year == current_month.year and x.month == current_month.month))]
+    
+    added_rows = []
+    skipped_items = []
+    
+    for _, row in prev_fixed_df.iterrows():
+        # 同じカテゴリー・内容のものが今月すでにないかチェック
+        exists = current_month_df[(current_month_df["カテゴリー"] == row["カテゴリー"]) & (current_month_df["内容"] == row["内容"])]
+        if exists.empty:
+            new_row = row.copy()
+            new_row["日付"] = current_month.replace(day=1)
+            added_rows.append(new_row.to_dict())
+        else:
+            skipped_items.append(f"{row['カテゴリー']}({row['内容']})")
+            
+    return added_rows, list(set(skipped_items))
+
+
+
 
 def get_supabase_client():
     if not SUPABASE_AVAILABLE: return None
@@ -226,10 +359,10 @@ def get_supabase_client():
 supabase = get_supabase_client()
 
 @st.cache_data(ttl=300)
-def load_data():
+def load_data(user_id: str):
     if supabase is not None:
         try:
-            response = supabase.table("transactions").select("*").eq("user_id", USER_ID).execute()
+            response = supabase.table("transactions").select("*").eq("user_id", user_id).execute()
             df = pd.DataFrame(response.data)
             if not df.empty:
                 df["日付"] = pd.to_datetime(df["日付"]).dt.date
@@ -241,67 +374,80 @@ def load_data():
     try:
         df = pd.read_csv(FILENAME)
         df["日付"] = pd.to_datetime(df["日付"]).dt.date
-        if "user_id" not in df.columns: df["user_id"] = USER_ID
-        return df
+        if "user_id" not in df.columns: df["user_id"] = user_id
+        # 現在のユーザーのデータのみを抽出
+        return df[df["user_id"] == user_id].copy()
     except:
         df = pd.DataFrame(columns=["user_id", "日付", "タイプ", "カテゴリー", "内容", "金額", "性質"])
-        df["性質"] = df["性質"].fillna("消費 (Need)")
         return df
 
-def save_data(df):
-    if "user_id" not in df.columns:
-        df["user_id"] = USER_ID
-        
+def save_data(df, user_id: str):
     df = df.copy()
+    df["user_id"] = user_id
+    
     try:
         df["金額"] = df["金額"].astype(int)
-        # 日付型の統一: datetime.date と pd.Timestamp の混在を防止
         df["日付"] = pd.to_datetime(df["日付"]).dt.date
     except Exception as e:
         st.error(f"データ型の変換に失敗しました: {e}")
         return
 
-    # キャッシュクリア（保存時にデータが変わるため）
-    try:
-        load_data.clear()
-    except Exception:
-        pass
+    # キャッシュクリア
+    load_data.clear()
 
-    if supabase is not None:
-        try:
+    # 1. Supabaseへの保存 (Resilience)
+    try:
+        if supabase is not None:
             records = df.to_dict(orient="records")
             for r in records:
                 if isinstance(r["日付"], (datetime.date, datetime.datetime)):
                     r["日付"] = r["日付"].strftime("%Y-%m-%d")
 
-            supabase.table("transactions").delete().eq("user_id", USER_ID).execute()
-            supabase.table("transactions").insert(records).execute()
-            
-            df.to_csv(FILENAME, index=False)
-            return
-        except Exception as e:
-            st.error(f"Supabase保存エラー: {e} (ローカルCSVに保存しました)")
+            supabase.table("transactions").delete().eq("user_id", user_id).execute()
+            if records:
+                supabase.table("transactions").insert(records).execute()
+            st.session_state.is_synced = True
+    except Exception as e:
+        handle_save_error(e)
 
-    df.to_csv(FILENAME, index=False)
+    # 2. ローカルCSV(バックアップ/フォールバック)
+    try:
+        full_df = pd.read_csv(FILENAME) if os.path.exists(FILENAME) else pd.DataFrame()
+        if not full_df.empty and "user_id" in full_df.columns:
+            full_df = full_df[full_df["user_id"] != user_id]
+        full_df = pd.concat([full_df, df], ignore_index=True)
+        full_df.to_csv(FILENAME, index=False, encoding='utf-8-sig')
+    except Exception as e:
+        st.error(f"ローカル保存エラー: {e}")
 
 if 'df' not in st.session_state:
-    st.session_state.df = load_data()
+    st.session_state.df = load_data(USER_ID)
 
 # --- バランスシート（BS）データの定義 ---
 ASSETS_FILENAME = "assets_data.csv"
-def load_assets_data():
+def load_assets_data(user_id: str):
     try:
         df = pd.read_csv(ASSETS_FILENAME)
         df["日付"] = pd.to_datetime(df["日付"]).dt.date
-        return df
+        if "user_id" not in df.columns: df["user_id"] = user_id
+        return df[df["user_id"] == user_id].copy()
     except:
-        return pd.DataFrame(columns=["日付", "区分", "項目名", "金額"])
+        return pd.DataFrame(columns=["user_id", "日付", "区分", "項目名", "金額"])
 
-def save_assets_data(df):
-    df.to_csv(ASSETS_FILENAME, index=False)
+def save_assets_data(df, user_id: str):
+    df = df.copy()
+    df["user_id"] = user_id
+    
+    # 既存データとのマージ
+    full_df = pd.read_csv(ASSETS_FILENAME) if os.path.exists(ASSETS_FILENAME) else pd.DataFrame()
+    if not full_df.empty and "user_id" in full_df.columns:
+        full_df = full_df[full_df["user_id"] != user_id]
+    
+    full_df = pd.concat([full_df, df], ignore_index=True)
+    full_df.to_csv(ASSETS_FILENAME, index=False)
 
 if 'assets_df' not in st.session_state:
-    st.session_state.assets_df = load_assets_data()
+    st.session_state.assets_df = load_assets_data(USER_ID)
 
 ASSET_TYPES = ["流動資産 (現金・預金)", "固定資産 (投資信託・株)", "固定資産 (不動産・その他)", "流動負債 (クレカ等)", "固定負債 (ローン)"]
 
@@ -532,7 +678,7 @@ def generate_cfp_diagnosis(income, outgo, fixed_cost, variable_cost, invest_amou
         'flexibility': flexibility,
         'safety_margin': safety_margin,
         'emergency_months': emergency_months,
-        'advices': advices,
+        'advices': advices or [ERROR_DATA_MISSING],
     }
 
 # --- 集計ロジック関数化 (DRY原則) ---
@@ -784,12 +930,16 @@ def manage_data_ui(
     is_bsフラグで「バランスシート」か「一般取引データ」かのエラーチェック挙動を切り替える。
     """
     
-    # リアルタイム反映 (UI上の表示のみ同期)
+    # リアルタイム反映＆バックグランド保存 (Resilience & Async-like experience)
     realtime_df = edited_df.drop(columns=["🗑️ 選択"], errors='ignore')
     if not realtime_df.equals(original_df):
         st.session_state[session_key] = realtime_df.copy()
-        msg = "右のグラフ" if is_bs else "サマリーとグラフ"
-        st.info(f"✏️ 編集内容が{msg}に反映されました（まだ保存されていません）。")
+        # 必須項目が埋まっている場合のみ自動保存を試みる
+        if not realtime_df.isnull().any().any():
+            save_func(realtime_df, USER_ID)
+            st.toast("✅ 変更を自動保存しました")
+        else:
+            st.warning("✏️ 編集中のため未保存です（必須項目を埋めてください）。")
 
     col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 1])
     prefix = "bs" if is_bs else "tab4"
@@ -864,10 +1014,45 @@ def manage_data_ui(
                 st.rerun()
 
 # --- 5. サイドバー ---
-st.sidebar.markdown("## マネレポ AI")
-# 不要なロゴ（イラスト）等の表示をコメントアウト
-# if os.path.exists("logo.png"):
-#     st.sidebar.image("logo.png", use_container_width=True)
+st.sidebar.markdown("## マネレポ ユニバーサル・コントロール")
+
+# --- ユーザー属性設定 ---
+st.sidebar.markdown("### 👤 ユーザー属性")
+st.session_state.business_type = st.sidebar.selectbox(
+    "事業形態", 
+    ["給与所得者", "個人事業主"], 
+    index=0 if st.session_state.business_type == "給与所得者" else 1,
+    help="事業主を選択すると、『給与』が『売上』に、『支出』が『経費』に切り替わります。"
+)
+
+with st.sidebar.expander("👨‍👩‍👧‍👦 家族構成・教育費設定", expanded=False):
+    num_kids = st.number_input("子供の人数", 0, 5, value=st.session_state.family_info["num_children"])
+    st.session_state.family_info["num_children"] = num_kids
+    
+    new_grades = []
+    grade_options = ["未就学", "小1", "小2", "小3", "小4", "小5", "小6", "中1", "中2", "中3", "高1", "高2", "高3", "大1", "大2", "大3", "大4"]
+    for i in range(num_kids):
+        prev_grade = st.session_state.family_info["child_grades"][i] if i < len(st.session_state.family_info["child_grades"]) else "未就学"
+        grade = st.selectbox(f"第{i+1}子の現在の学年", grade_options, index=grade_options.index(prev_grade), key=f"kid_g_{i}")
+        new_grades.append(grade)
+    
+    st.session_state.family_info["child_grades"] = new_grades
+    
+    if st.button("✨ 教育費イベントを自動生成", use_container_width=True):
+        st.session_state.life_events = generate_education_events(num_kids, new_grades)
+        st.success("ライフイベント表を更新しました！『投資シミュ』タブで確認・編集できます。")
+
+# --- 共通パラメータ一括管理 ---
+st.sidebar.markdown("### ⚙️ 共通パラメータ")
+with st.sidebar.expander("分析・シミュレーション設定", expanded=False):
+    st.session_state.sim_params["years"] = st.slider("⏳ 運用期間 (年)", 1, 30, st.session_state.sim_params["years"])
+    st.session_state.sim_params["rate"] = st.slider("📈 想定利回り (%)", 1.0, 10.0, st.session_state.sim_params["rate"], step=0.5)
+    st.session_state.sim_params["inflation"] = st.slider("📉 想定インフレ率 (%)", 0.0, 5.0, st.session_state.sim_params["inflation"], step=0.5)
+    st.session_state.sim_params.update({
+        "use_tax": st.checkbox("💸 特定口座（税引後）", value=st.session_state.sim_params["use_tax"])
+    })
+
+st.sidebar.markdown("---")
 
 # --- ⚡️ サイドバー クイック入力 ---
 st.sidebar.markdown("### クイック入力")
@@ -890,8 +1075,27 @@ with st.sidebar.form("quick_input_form", clear_on_submit=True):
             tag = qi_tag if qi_type == "支出" else "収入"
             new_row = pd.DataFrame([{"user_id": USER_ID, "日付": qi_date, "タイプ": qi_type, "カテゴリー": qi_cat, "内容": memo, "金額": qi_amt, "性質": tag}])
             st.session_state.df = pd.concat([st.session_state.df, new_row], ignore_index=True)
-            save_data(st.session_state.df)
+            save_data(st.session_state.df, USER_ID)
             st.success(f"✅ {qi_date} {qi_cat} ({qi_amt:,}円) を保存")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 📥 データポータビリティ")
+csv_data = st.session_state.df.to_csv(index=False).encode('utf-8-sig')
+st.sidebar.download_button(
+    label="📦 全データをCSVとしてエクスポート",
+    data=csv_data,
+    file_name=f"manerepo_data_{datetime.date.today()}.csv",
+    mime='text/csv',
+    use_container_width=True
+)
+json_data = st.session_state.df.to_json(orient="records", force_ascii=False)
+st.sidebar.download_button(
+    label="💾 全データをJSONとしてバックアップ",
+    data=json_data,
+    file_name=f"manerepo_backup_{datetime.date.today()}.json",
+    mime='application/json',
+    use_container_width=True
+)
 
 st.sidebar.markdown("---")
 
@@ -917,36 +1121,87 @@ with st.sidebar.expander("⚙️ 固定費テンプレート編集", expanded=Fa
         if added_rows: st.rerun()
 
 # --- 6. メイン画面 ---
-st.markdown("# 💰 マネレポ AI 財テクくん")
-
-
 today = datetime.date.today()
 if "view_date" not in st.session_state:
     st.session_state.view_date = today.replace(day=1)
 
-# 表示月に基づいて指標を計算
+# 1. 常に「現在の月」のデータに基づいた指標を計算（ダッシュボード着地予測用）
+curr_summaries = calculate_summaries(st.session_state.df, today)
+actual_balance_current = curr_summaries.get('balance', 0)
+
+# 2. 表示月（ナビゲーションで変更可能）に基づいた指標を計算（タブ内表示用）
 summaries = calculate_summaries(st.session_state.df, st.session_state.view_date)
 
-# 各種指標の抽出
-income = summaries['income']
-outgo = summaries['outgo']
-balance = summaries['balance']
-invest_actual_month = summaries['invest_actual_month']
-invest_actual_all = summaries['invest_actual_all']
-invest_monthly_avg = summaries['invest_monthly_avg']
-lm_outgo = summaries['lm_outgo']
-lm_income = summaries['lm_income']
-fixed_cost = summaries['fixed_cost']
-variable_cost = summaries['variable_cost']
-fixed_cost_ratio = summaries['fixed_cost_ratio']
-variable_cost_ratio = summaries['variable_cost_ratio']
-savings_ratio = summaries['savings_ratio']
-avg_monthly_expense = summaries['avg_monthly_expense']
-this_month_df = summaries['this_month_df']
-last_month_df = summaries['last_month_df']
-total_records = summaries['total_records']
-total_income_all = summaries['total_income_all']
-total_expense = summaries['total_expense']
+income = summaries.get('income', 0)
+outgo = summaries.get('outgo', 0)
+balance = summaries.get('balance', 0)
+invest_actual_month = summaries.get('invest_actual_month', 0)
+invest_actual_all = summaries.get('invest_actual_all', 0)
+invest_monthly_avg = summaries.get('invest_monthly_avg', 0)
+lm_outgo = summaries.get('lm_outgo', 0)
+lm_income = summaries.get('lm_income', 0)
+fixed_cost = summaries.get('fixed_cost', 0)
+variable_cost = summaries.get('variable_cost', 0)
+fixed_cost_ratio = summaries.get('fixed_cost_ratio', 0)
+variable_cost_ratio = summaries.get('variable_cost_ratio', 0)
+savings_ratio = summaries.get('savings_ratio', 0)
+avg_monthly_expense = summaries.get('avg_monthly_expense', 0)
+this_month_df = summaries.get('this_month_df', pd.DataFrame())
+last_month_df = summaries.get('last_month_df', pd.DataFrame())
+total_records = summaries.get('total_records', 0)
+total_income_all = summaries.get('total_income_all', 0)
+total_expense = summaries.get('total_expense', 0)
+
+# 財務コンサルタントによる診断ロジックの実行 (dashboadでも使用するため早めに実行)
+cfp = generate_cfp_diagnosis(
+    income=income, outgo=outgo, 
+    fixed_cost=fixed_cost, variable_cost=variable_cost, 
+    invest_amount=invest_actual_month, 
+    total_assets=invest_actual_all, 
+    avg_monthly_expense=avg_monthly_expense
+)
+
+label_inc = get_label("income")
+label_exp = get_label("expense")
+st.markdown(f"# 💰 マネレポ AI 財テクくん ({st.session_state.business_type}モード)")
+
+# --- リアルタイム統合メトリック（着地予測） ---
+if not st.session_state.df.empty:
+    # PL目線(収支)とBS目線(純資産)の統合：着地予測純資産の計算
+    current_net_worth = 0
+    if not st.session_state.assets_df.empty:
+        temp_assets = st.session_state.assets_df.copy()
+        temp_assets["実額"] = temp_assets.apply(lambda r: r["金額"] if "資産" in str(r["区分"]) else -r["金額"], axis=1)
+        current_net_worth = temp_assets["実額"].sum()
+    
+    # ダッシュボードは「現在の実際の収支」を加算して予測値を出す
+    predicted_net_worth = current_net_worth + actual_balance_current
+    
+    col_dash1, col_dash2 = st.columns([1, 1])
+    with col_dash1:
+        nw_color = "#43a047" if predicted_net_worth >= 0 else "#e53935"
+        st.markdown(f"""
+        <div style="background: white; border-radius: 16px; padding: 24px; border-left: 10px solid {nw_color}; box-shadow: 0 4px 20px rgba(0,0,0,0.08);">
+            <div style="font-size: 0.9rem; color: #757575; font-weight: 700; text-transform: uppercase; letter-spacing: 1px;">🏁 今月末の着地予測純資産</div>
+            <div style="font-size: 2.8rem; font-weight: 900; color: {nw_color}; margin: 8px 0;">{predicted_net_worth:,.0f} <span style="font-size: 1.2rem;">円</span></div>
+            <div style="font-size: 0.85rem; color: #555;">現在 {current_net_worth:,}円 ＋ 今月予測 {actual_balance_current:+,}円</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col_dash2:
+        # 生活防衛資金アラート
+        em_val = float(cfp.get('emergency_months', 0.0))
+        if em_val < 3:
+            st.error(f"🚨 **生活防衛資金アラート**: 現在の資産は月平均支出の {em_val:.1f} ヶ月分です。最低3ヶ月分の確保（あと {max(0, 3-em_val):.1f} ヶ月分）を最優先してください。")
+        elif em_val < 6:
+            st.warning(f"⚠️ **生活防衛資金アドバイス**: 生活防衛資金は {em_val:.1f} ヶ月分です。目標の6ヶ月分に向けて、着実に積み立てを続けましょう。")
+        else:
+            st.success(f"✨ **財務健全性チェック**: 生活防衛資金は {em_val:.1f} ヶ月分確保されており、非常に健全です。余剰金は積極的に投資に回しましょう。")
+        
+        if not st.session_state.is_synced:
+            st.info("🔄 **オフラインモード**: 現在データをローカルに保存しています。接続復帰時に自動同期されます。")
+else:
+    st.warning("👋 **Welcome!** まだデータがありません。サイドバーの「クイック入力」または「データ管理」タブからCSVインポートをして、あなた専用の財務分析を開始しましょう！")
 
 tab0, tab1, tab_ai, tab_bs, tab2, tab3, tab4 = st.tabs(["📝 記録する", "🏆 診断・スコア", "🤖 AIアドバイス", "🏦 純資産(BS)", "📊 財務分析", "📈 投資シミュ", "⚙️ データ管理"])
 
@@ -1018,18 +1273,18 @@ with tab1:
             st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
-    # --- サマリー (st.metric 前月比デルタ付き) ---
+    label_bal = get_label("balance")
     c1, c2, c3 = st.columns(3)
     with c1:
         delta_income = income - lm_income if lm_income > 0 else None
-        st.metric("💰 今月の収入", f"{income:,.0f} 円", delta=f"{delta_income:+,.0f} 円" if delta_income is not None else None)
+        st.metric(f"💰 今月の{label_inc}", f"{income:,.0f} 円", delta=f"{delta_income:+,.0f} 円" if delta_income is not None else None)
     with c2:
         delta_outgo = outgo - lm_outgo if lm_outgo > 0 else None
-        st.metric("💸 今月の支出", f"{outgo:,.0f} 円", delta=f"{delta_outgo:+,.0f} 円" if delta_outgo is not None else None, delta_color="inverse")
+        st.metric(f"💸 今月の{label_exp}", f"{outgo:,.0f} 円", delta=f"{delta_outgo:+,.0f} 円" if delta_outgo is not None else None, delta_color="inverse")
     with c3:
         lm_balance = lm_income - lm_outgo
         delta_balance = balance - lm_balance if (lm_income > 0 or lm_outgo > 0) else None
-        st.metric("⚖️ 収支バランス", f"{balance:,.0f} 円", delta=f"{delta_balance:+,.0f} 円" if delta_balance is not None else None)
+        st.metric(f"⚖️ {label_bal}", f"{balance:,.0f} 円", delta=f"{delta_balance:+,.0f} 円" if delta_balance is not None else None)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1371,11 +1626,13 @@ with tab_ai:
 
         # 2-2. 【パーソナル診断】コンサルタントの眼
         st.markdown('#### 👁️ コンサルタントの眼 (データ解析結果)')
+        # ノートが空の場合はメッセージを表示
+        display_notes = ai_report['notes'] if ai_report['notes'] else [ERROR_DATA_MISSING]
         st.markdown(f"""
         <div style="background-color: #f8f9fa; border: 1px solid #e0e0e0; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
             <div style="font-weight: bold; color: #1976d2; margin-bottom: 8px;">👤 診断された家計性格: 「{ai_report['persona']}」</div>
             <ul style="margin: 0; padding-left: 20px; color: #424242; line-height: 1.8;">
-                {"".join([f"<li>{note}</li>" for note in ai_report['notes']])}
+                {"".join([f"<li>{note}</li>" for note in display_notes])}
             </ul>
         </div>
         """, unsafe_allow_html=True)
@@ -1431,12 +1688,12 @@ with tab2:
         
         fig_cf = go.Figure()
         # 収入・支出のエリアチャート
-        fig_cf.add_trace(go.Scatter(x=hist_df["年月"], y=hist_df["収入"], name="総収入", fill='tozeroy', 
+        fig_cf.add_trace(go.Scatter(x=hist_df["年月"], y=hist_df["収入"], name=f"総{label_inc}", fill='tozeroy', 
                                     line={"color": "rgba(67, 160, 71, 0.8)", "width": 3}, fillcolor='rgba(67, 160, 71, 0.2)'))
-        fig_cf.add_trace(go.Scatter(x=hist_df["年月"], y=hist_df["支出"], name="総支出", fill='tozeroy', 
+        fig_cf.add_trace(go.Scatter(x=hist_df["年月"], y=hist_df["支出"], name=f"総{label_exp}", fill='tozeroy', 
                                     line={"color": "rgba(229, 57, 53, 0.8)", "width": 3}, fillcolor='rgba(229, 57, 53, 0.2)'))
         # BEPライン（平均固定費）を重畳
-        fig_cf.add_trace(go.Scatter(x=hist_df["年月"], y=[avg_fixed]*len(hist_df), name="損益分岐点 (平均固定費)", 
+        fig_cf.add_trace(go.Scatter(x=hist_df["年月"], y=[avg_fixed]*len(hist_df), name=f"損益分岐点 (平均固定{label_exp})", 
                                     line={"color": "rgba(33, 33, 33, 0.6)", "dash": "dash"}, mode='lines'))
         
         fig_cf.update_layout(height=400, margin={"t": 10, "b": 10, "l": 10, "r": 10}, hovermode="x unified",
@@ -1561,9 +1818,9 @@ with tab2:
         if income > 0:
             in_cats = this_month_df[this_month_df["タイプ"] == "収入"].groupby("カテゴリー")["金額"].sum()
             out_cats = this_month_df[this_month_df["タイプ"] == "支出"].groupby("カテゴリー")["金額"].sum()
-            labels = list(in_cats.index) + ["総収入"] + list(out_cats.index)
+            labels = list(in_cats.index) + [f"総{label_inc}"] + list(out_cats.index)
             if balance > 0: labels.append("残額（貯蓄・繰越）")
-            elif balance < 0: labels.append("赤字補填（取り崩し）")
+            elif balance < 0: labels.append(f"赤字補填 ({label_exp}超過)")
             
             # 定番カテゴリのカラーマップ定義
             cd_map = {
@@ -1634,22 +1891,70 @@ with tab3:
             <div class="value" style="color:#00897b; font-size:1.5rem;">{invest_monthly_avg:,.0f}<span style="font-size:0.9rem;"> 円</span></div>
         </div>""", unsafe_allow_html=True)
 
+    # --- ライフイベント表の表示・編集 ---
+    st.markdown('<div class="section-header">📅 未来のライフイベント表 (手動調整可能)</div>', unsafe_allow_html=True)
+    st.caption("イベント名や金額を直接編集したり、行を追加して独自プランを作成できます。")
+    edited_events = st.data_editor(
+        st.session_state.life_events,
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "年": st.column_config.NumberColumn("年", format="%d", min_value=2024),
+            "金額": st.column_config.NumberColumn("想定コスト (円)", format="%d", min_value=0),
+        },
+        key="life_event_editor"
+    )
+    if not edited_events.equals(st.session_state.life_events):
+        st.session_state.life_events = edited_events
+        st.toast("ライフイベントを保存しました。")
+    
+    total_life_event_costs = edited_events["金額"].sum()
+    st.info(f"💡 未来のライフイベント合計予測コスト: **{total_life_event_costs:,.0f} 円**")
+
+    # --- 事業所得・節税シミュレーター (個人事業主のみ) ---
+    if st.session_state.business_type == "個人事業主":
+        st.markdown('<div class="section-header">💼 事業所得・節税シミュレーター</div>', unsafe_allow_html=True)
+        biz_col1, biz_col2 = st.columns([1, 1])
+        with biz_col1:
+            # 直近3ヶ月平均をデフォルトにするなどの工夫も可能だが、今回は手動入力を活かす
+            est_sales = st.number_input("想定月間売上 (円)", min_value=0, value=int(income) if income > 0 else 500000, step=10000)
+            est_costs = st.number_input("想定月間経費 (円)", min_value=0, value=int(outgo) if outgo > 0 else 200000, step=10000)
+            annual_biz_income = (est_sales - est_costs) * 12
+        
+        with biz_col2:
+            tax_amt, taxable_inc = calculate_approx_tax(annual_biz_income, "個人事業主")
+            tax_amt_no_blue, _ = calculate_approx_tax(annual_biz_income, "給与所得者") # 控除なし比較
+            tax_saving = max(0, tax_amt_no_blue - tax_amt)
+            
+            st.markdown(f"""<div style="background:#f1f8e9; border-radius:12px; padding:20px; border:1px solid #c5e1a5;">
+                <div style="font-size:0.85rem; color:#558b2f; font-weight:700;">青色申告控除(65万)適用後の実質所得</div>
+                <div style="font-size:1.8rem; font-weight:900; color:#2e7d32; line-height:1;">{(annual_biz_income - tax_amt):,}<span style="font-size:0.9rem;"> 円/年</span></div>
+                <div style="margin-top:10px; font-size:0.85rem; color:#666;">
+                    推定納税額: {tax_amt:,} 円<br>
+                    <span style="color:#d32f2f; font-weight:700;">✨ 節税効果: {tax_saving:,} 円/年</span>
+                </div>
+            </div>""", unsafe_allow_html=True)
+            
+        st.caption(f"※この節税分（{tax_saving:,}円）を毎年 3% で 20年運用すると、将来 **{int(tax_saving * ((1.03**20 - 1)/0.03)):,}円** の追加資産になります。")
+
     col_param, col_result = st.columns([1, 1])
     default_invest = int(invest_monthly_avg) if invest_monthly_avg > 0 else 10000
 
     with col_param:
         st.markdown("""<div style="background:white; border-radius:16px; padding:24px; box-shadow:0 4px 20px rgba(0,0,0,0.06);">
             <h3 style="margin-top:0;">⚙️ シミュレーション設定</h3>
+            <p style="font-size:0.8rem; color:#666;">※サイドバーの共通パラメータと同期しています</p>
         </div>""", unsafe_allow_html=True)
         reduction = st.slider("💰 毎月の追加投資額 (円)", 0, 200000, default_invest, step=1000)
-        years = st.slider("⏳ 運用期間 (年)", 1, 30, 10)
-        rate_pct = st.slider("📈 想定利回り (%)", 1.0, 10.0, 3.0, step=0.5)
+        years = st.slider("⏳ 運用期間 (年)", 1, 30, st.session_state.sim_params["years"], key="sim_years")
+        rate_pct = st.slider("📈 想定利回り (%)", 1.0, 10.0, st.session_state.sim_params["rate"], step=0.5, key="sim_rate")
         
         with st.expander("🛠 高度なシミュレーション設定"):
-            inflation_pct = st.slider("📉 想定インフレ率 (%)", 0.0, 5.0, 2.0, step=0.5,
+            st.session_state.sim_params["inflation"] = st.slider("📉 想定インフレ率 (%)", 0.0, 5.0, st.session_state.sim_params["inflation"], step=0.5,
                                        help="将来の金額を現在の価値に換算するための物価上昇率です。日本の近年の目標は2%前後です。")
-            use_tax = st.checkbox("💸 特定口座（税金 20.315% を考慮する）", value=False, help="チェックを入れると、運用益に対して20.315%の税金が引かれた手取り額を試算します。（NISA口座なら非課税のためチェック不要）")
+            use_tax = st.checkbox("💸 特定口座（税金 20.315% を考慮する）", value=st.session_state.sim_params["use_tax"], help="チェックを入れると、運用益に対して20.315%の税金が引かれた手取り額を試算します。（NISA口座なら非課税のためチェック不要）")
 
+    inflation_pct = st.session_state.sim_params["inflation"]
     # --- 関数呼び出しによる複利計算（インフレ調整済み） ---
     TAX_RATE = 0.20315
     values, future_val_nisa, total_invested = calculate_compound_interest(
@@ -1807,21 +2112,27 @@ with tab4:
             </div>""", unsafe_allow_html=True)
     
     if st.button("🔌 今月の固定費を一括登録する", use_container_width=True, key="btn_fixed_cost_bulk"):
-        added_rows, skipped_items = register_fixed_costs(
-            st.session_state.df, template_to_use, USER_ID
-        )
+        template_to_use = st.session_state.get('fixed_costs', FIXED_COST_TEMPLATE)
+        added_rows, skipped_items = register_fixed_costs(st.session_state.df, template_to_use, USER_ID)
         if added_rows:
-            st.session_state.df = pd.concat(
-                [st.session_state.df, pd.DataFrame(added_rows)], ignore_index=True
-            )
-            save_data(st.session_state.df)
-            st.success(f"✅ {len(added_rows)} 件の固定費を登録しました！")
+            st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(added_rows)], ignore_index=True)
+            save_data(st.session_state.df, USER_ID)
+            st.success(f"✅ {len(added_rows)} 件登録完了")
         if skipped_items:
-            st.warning(f"⚠️ 以下は今月すでに登録済みのためスキップしました: {', '.join(skipped_items)}")
-        if not added_rows and not skipped_items:
-            st.info("登録する固定費がありません。サイドバーでテンプレートを設定してください。")
+            st.warning(f"⚠️ {len(skipped_items)} 件スキップ（登録済）")
+        if added_rows: st.rerun()
+
+    st.markdown('<div class="section-header">📋 前月の固定費から賢くコピー</div>', unsafe_allow_html=True)
+    st.caption("前月に利用した実データから、カテゴリが『固定費』のものを抽出して今月の1日にコピーします。")
+    if st.button("✨ 前月分を一括コピー (スマート複製)", use_container_width=True):
+        added_rows, skipped_items = register_fixed_costs_from_prev_month(st.session_state.df, USER_ID, datetime.date.today())
         if added_rows:
-            st.rerun()
+            st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(added_rows)], ignore_index=True)
+            save_data(st.session_state.df, USER_ID)
+            st.success(f"✅ {len(added_rows)} 件をコピーしました！")
+        if skipped_items:
+            st.info(f"💡 {len(skipped_items)} 件は既に今月に存在するためスキップしました。")
+        if added_rows: st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1834,12 +2145,12 @@ with tab4:
         </div>""", unsafe_allow_html=True)
     with c2:
         st.markdown(f"""<div class="metric-card" style="border-left-color:#43a047;">
-            <div class="label">💰 累計収入</div>
+            <div class="label">💰 {get_label("income_all")}</div>
             <div class="value" style="font-size:1.5rem;">{total_income_all:,.0f}<span style="font-size:0.9rem;"> 円</span></div>
         </div>""", unsafe_allow_html=True)
     with c3:
         st.markdown(f"""<div class="metric-card" style="border-left-color:#ef6c00;">
-            <div class="label">💸 累計支出</div>
+            <div class="label">💸 累計{label_exp}</div>
             <div class="value" style="color:#ef6c00; font-size:1.5rem;">{total_expense:,.0f}<span style="font-size:0.9rem;"> 円</span></div>
         </div>""", unsafe_allow_html=True)
 
@@ -1881,22 +2192,42 @@ with tab4:
     uploaded_csv = st.file_uploader("CSVファイルを選択してください", type="csv")
     if uploaded_csv:
         try:
-            csv_df = pd.read_csv(uploaded_csv)
+            # 文字コードの自動判別（UTF-8かShift-JISか）
+            raw_data = uploaded_csv.read()
+            uploaded_csv.seek(0) # ポインタを戻す
+            
+            try:
+                csv_df = pd.read_csv(uploaded_csv, encoding='utf-8')
+            except UnicodeDecodeError:
+                uploaded_csv.seek(0)
+                csv_df = pd.read_csv(uploaded_csv, encoding='shift-jis')
+            
             st.write("プレビュー (最初の5行):", csv_df.head())
             
             st.markdown("#### 🔄 カラムのマッピング")
             st.caption("アップロードしたCSVのどの列が、アプリ内の各項目に対応するかを選択してください。")
             cols = csv_df.columns.tolist()
             
+            # カラム推測ロジック
+            def guess_col(keywords, columns):
+                for c in columns:
+                    if any(kw in str(c) for kw in keywords):
+                        return columns.index(c) + 1
+                return 0
+
             map_c1, map_c2, map_c3, map_c4 = st.columns(4)
             with map_c1:
-                date_col = st.selectbox("📅 日付 に該当する列", options=["（選択しない）"] + cols, index=cols.index("日付")+1 if "日付" in cols else 0)
+                idx_date = guess_col(["日付", "年月日", "date", "Date"], cols)
+                date_col = st.selectbox("📅 日付 に該当する列", options=["（選択しない）"] + cols, index=idx_date)
             with map_c2:
-                amt_col = st.selectbox("💰 金額 に該当する列", options=["（選択しない）"] + cols, index=cols.index("金額")+1 if "金額" in cols else 0)
+                idx_amt = guess_col(["金額", "振込", "支払", "amount", "Amount", "税込"], cols)
+                amt_col = st.selectbox("💰 金額 に該当する列", options=["（選択しない）"] + cols, index=idx_amt)
             with map_c3:
-                memo_col = st.selectbox("📝 内容 に該当する列", options=["（選択しない）"] + cols, index=cols.index("内容")+1 if "内容" in cols else 0)
+                idx_memo = guess_col(["内容", "摘要", "メモ", "memo", "Description", "利用店"], cols)
+                memo_col = st.selectbox("📝 内容 に該当する列", options=["（選択しない）"] + cols, index=idx_memo)
             with map_c4:
-                type_col = st.selectbox("🔄 タイプ(収入/支出) 列", options=["（選択しない）"] + cols, index=cols.index("タイプ")+1 if "タイプ" in cols else 0)
+                idx_type = guess_col(["タイプ", "入出", "区分", "type", "Type"], cols)
+                type_col = st.selectbox("🔄 タイプ(収入/支出) 列", options=["（選択しない）"] + cols, index=idx_type)
             
             # TODO: 収入・支出の固定指定や、金額の正負での判定も可能だが、今回はシンプルなマッピングを優先
             default_type_fallback = st.radio("「タイプ」列がない場合のデフォルト:", ["支出", "収入"], horizontal=True)
@@ -1953,23 +2284,6 @@ with tab4:
             st.error(f"CSVの読み込みに失敗しました: {e}")
 
     st.markdown("<br><br>", unsafe_allow_html=True)
-
-    st.markdown("#### 高度なエクスポート")
-    e1, e2 = st.columns(2)
-    with e1:
-        if not st.session_state.df.empty:
-            csv_data = st.session_state.df.drop(columns=["user_id"], errors='ignore').to_csv(index=False).encode('utf-8-sig')
-            st.download_button("📥 CSVダウンロード", csv_data, "kakeibo_export.csv", "text/csv", use_container_width=True, key="tab4_dl_csv")
-    with e2:
-        if not st.session_state.df.empty:
-            try:
-                # JSONエクスポート機能（日付を文字列に明示的に変換してからJSON化）
-                json_df = st.session_state.df.drop(columns=["user_id"], errors='ignore').copy()
-                json_df['日付'] = json_df['日付'].astype(str)
-                json_data = json_df.to_json(orient="records", force_ascii=False, indent=2)
-                st.download_button("📜 JSONダウンロード", json_data, "kakeibo_export.json", "application/json", use_container_width=True, key="tab4_dl_json")
-            except Exception as e:
-                st.error(f"JSON変換エラー: {e}")
 
 # ================================================================
 # Tab BS: バランスシート（純資産管理）
