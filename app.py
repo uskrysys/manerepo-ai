@@ -218,9 +218,18 @@ h3 { font-size: 18px !important; }
 """, unsafe_allow_html=True)
 
 FILENAME = "kakeibo_data_v2.csv"
-# --- ユーザー属性・ステート管理 ---
+# --- ユーザー情報の中心管理 ---
+def get_current_user_id():
+    """
+    現在ログインしているユーザーIDを返します。
+    将来的に Supabase Auth を実装した際は、ここを return supabase.auth.user().id に変更するだけで済みます。
+    """
+    # 暫定的に固定のUUID形式（22P02エラー対策）を使用
+    DUMMY_UUID = "00000000-0000-0000-0000-000000000000"
+    return DUMMY_UUID
+
 if "user_id" not in st.session_state:
-    st.session_state.user_id = "local_user_001"
+    st.session_state.user_id = get_current_user_id()
 USER_ID = st.session_state.user_id
 
 if "business_type" not in st.session_state:
@@ -1029,7 +1038,7 @@ def manage_data_ui(
                     pass
                 st.session_state[backup_key] = st.session_state[session_key].copy()
                 st.session_state[session_key] = save_df
-                save_func(save_df)
+                save_func(save_df, USER_ID)
                 st.success(f"✅ データの整合性チェックを通過し、{name}に保存されました！")
                 st.rerun()
                 
@@ -1037,7 +1046,7 @@ def manage_data_ui(
         if backup_key in st.session_state and not st.session_state[backup_key].empty:
             if st.button("↩️ 直前の状態に戻す (UNDO)", use_container_width=True, key=f"btn_undo_{prefix}"):
                 st.session_state[session_key] = st.session_state[backup_key].copy()
-                save_func(st.session_state[session_key])
+                save_func(st.session_state[session_key], USER_ID)
                 del st.session_state[backup_key]
                 st.warning("⚠️ データを直前の状態に復元しました。")
                 st.rerun()
@@ -1050,7 +1059,7 @@ def manage_data_ui(
                 keep_df = edited_df[~edited_df["🗑️ 選択"]].drop(columns=["🗑️ 選択"], errors='ignore')
                 st.session_state[backup_key] = st.session_state[session_key].copy()
                 st.session_state[session_key] = keep_df.reset_index(drop=True)
-                save_func(st.session_state[session_key])
+                save_func(st.session_state[session_key], USER_ID)
                 st.success(f"✅ {int(selected_count)} 件の{target_name}を削除しました。")
                 st.rerun()
 
