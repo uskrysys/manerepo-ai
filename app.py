@@ -20,7 +20,7 @@ except ImportError:
     SUPABASE_AVAILABLE = False
 
 # --- 1. ページ設定 ---
-st.set_page_config(page_title="マネレポ AI 財テクくん", layout="wide", page_icon="💰")
+st.set_page_config(page_title="Manerepo - 次世代家計簿・資産管理プラットフォーム", layout="wide", page_icon="💰")
 
 # --- 定数定義 ---
 CURRENCY = "円"
@@ -424,8 +424,21 @@ if 'df' not in st.session_state:
     st.session_state.df = load_data(USER_ID)
 
 # --- バランスシート（BS）データの定義 ---
-ASSETS_FILENAME = "assets_data.csv"
+ASSETS_FILENAME = "assets_data_v2.csv"
+
+@st.cache_data(ttl=300)
 def load_assets_data(user_id: str):
+    if supabase is not None:
+        try:
+            response = supabase.table("assets").select("*").eq("user_id", user_id).execute()
+            df = pd.DataFrame(response.data)
+            if not df.empty:
+                df["日付"] = pd.to_datetime(df["日付"]).dt.date
+                return df
+        except Exception as e:
+            st.sidebar.warning(f"Supabase(BS)読込エラー: {e}")
+            
+    # フォールバック
     try:
         df = pd.read_csv(ASSETS_FILENAME)
         df["日付"] = pd.to_datetime(df["日付"]).dt.date
@@ -438,18 +451,44 @@ def save_assets_data(df, user_id: str):
     df = df.copy()
     df["user_id"] = user_id
     
-    # 既存データとのマージ
-    full_df = pd.read_csv(ASSETS_FILENAME) if os.path.exists(ASSETS_FILENAME) else pd.DataFrame()
-    if not full_df.empty and "user_id" in full_df.columns:
-        full_df = full_df[full_df["user_id"] != user_id]
-    
-    full_df = pd.concat([full_df, df], ignore_index=True)
-    full_df.to_csv(ASSETS_FILENAME, index=False)
+    try:
+        df["金額"] = df["金額"].astype(int)
+        df["日付"] = pd.to_datetime(df["日付"]).dt.date
+    except Exception as e:
+        st.error(f"BSデータ型の変換に失敗しました: {e}")
+        return
+
+    # キャッシュクリア
+    load_assets_data.clear()
+
+    # 1. Supabaseへの保存
+    try:
+        if supabase is not None:
+            records = df.to_dict(orient="records")
+            for r in records:
+                if isinstance(r["日付"], (datetime.date, datetime.datetime)):
+                    r["日付"] = r["日付"].strftime("%Y-%m-%d")
+
+            supabase.table("assets").delete().eq("user_id", user_id).execute()
+            if records:
+                supabase.table("assets").insert(records).execute()
+    except Exception as e:
+        st.sidebar.error(f"Supabase(BS)保存エラー: {e}")
+
+    # 2. ローカルCSV
+    try:
+        full_df = pd.read_csv(ASSETS_FILENAME) if os.path.exists(ASSETS_FILENAME) else pd.DataFrame()
+        if not full_df.empty and "user_id" in full_df.columns:
+            full_df = full_df[full_df["user_id"] != user_id]
+        full_df = pd.concat([full_df, df], ignore_index=True)
+        full_df.to_csv(ASSETS_FILENAME, index=False, encoding='utf-8-sig')
+    except Exception as e:
+        st.error(f"BSローカル保存エラー: {e}")
 
 if 'assets_df' not in st.session_state:
     st.session_state.assets_df = load_assets_data(USER_ID)
 
-ASSET_TYPES = ["流動資産 (現金・預金)", "固定資産 (投資信託・株)", "固定資産 (不動産・その他)", "流動負債 (クレカ等)", "固定負債 (ローン)"]
+ASSET_TYPES = ["流動資産 (現金・預金)", "固定資産 (投資信託・証券)", "固定資産 (不動産・その他)", "流動負債 (クレカ等)", "固定負債 (ローン)"]
 
 # --- 4. 財務会計ベースのマスターカテゴリ体系（単一ソース） ---
 EXPENSE_MASTER = {
@@ -530,6 +569,8 @@ def generate_ai_advisor_report(df, assets_df, cfp, summaries):
         total_assets = temp_bs[temp_bs["実額"] > 0]["実額"].sum()
         total_liabilities = abs(temp_bs[temp_bs["実額"] < 0]["実額"].sum())
     
+    balance = 0
+    current_net_worth = 0
     net_worth = total_assets - total_liabilities
     equity_ratio = (net_worth / total_assets * 100) if total_assets > 0 else 0
     
@@ -1016,102 +1057,67 @@ def manage_data_ui(
 # --- 5. サイドバー ---
 st.sidebar.markdown("## 🧭 マネレポ ユニバーサル・コントロール")
 
-# --- クイックガイド ---
-st.sidebar.info("💡 **クイックガイド**\n\nデータの入力は『記録する』タブ、または『データ管理』タブの表の最下部から直接行えます。")
+# --- 案内メッセージ ---
+st.sidebar.info("💡 **ガイド**\n\nデータの入力・編集は各タブ内のエディタ（表の最下部など）で行ってください。")
 st.sidebar.markdown("---")
 
 # --- ユーザー属性設定 ---
 st.sidebar.markdown("### 👤 ユーザー属性")
-st.session_state.business_type = st.sidebar.selectbox(
+is_biz = st.sidebar.radio(
     "事業形態", 
     ["給与所得者", "個人事業主"], 
     index=0 if st.session_state.business_type == "給与所得者" else 1,
+    horizontal=True,
     help="事業主を選択すると、『給与』が『売上』に、『支出』が『経費』に切り替わります。"
 )
-
-with st.sidebar.expander("👨‍👩‍👧‍👦 家族構成・教育費設定", expanded=False):
-    num_kids = st.number_input("子供の人数", 0, 5, value=st.session_state.family_info["num_children"])
-    st.session_state.family_info["num_children"] = num_kids
-    
-    new_grades = []
-    grade_options = ["未就学", "小1", "小2", "小3", "小4", "小5", "小6", "中1", "中2", "中3", "高1", "高2", "高3", "大1", "大2", "大3", "大4"]
-    for i in range(num_kids):
-        prev_grade = st.session_state.family_info["child_grades"][i] if i < len(st.session_state.family_info["child_grades"]) else "未就学"
-        grade = st.selectbox(f"第{i+1}子の現在の学年", grade_options, index=grade_options.index(prev_grade), key=f"kid_g_{i}")
-        new_grades.append(grade)
-    
-    st.session_state.family_info["child_grades"] = new_grades
-    
-    if st.button("✨ 教育費イベントを自動生成", use_container_width=True):
-        st.session_state.life_events = generate_education_events(num_kids, new_grades)
-        st.success("ライフイベント表を更新しました！『投資シミュ』タブで確認・編集できます。")
+st.session_state.business_type = is_biz
 
 # --- 共通パラメータ一括管理 ---
 st.sidebar.markdown("### ⚙️ 共通パラメータ")
-with st.sidebar.expander("分析・シミュレーション設定", expanded=False):
-    st.session_state.sim_params["years"] = st.slider("⏳ 運用期間 (年)", 1, 30, st.session_state.sim_params["years"])
-    st.session_state.sim_params["rate"] = st.slider("📈 想定利回り (%)", 1.0, 10.0, st.session_state.sim_params["rate"], step=0.5)
-    st.session_state.sim_params["inflation"] = st.slider("📉 想定インフレ率 (%)", 0.0, 5.0, st.session_state.sim_params["inflation"], step=0.5)
-    st.session_state.sim_params.update({
-        "use_tax": st.checkbox("💸 特定口座（税引後）", value=st.session_state.sim_params["use_tax"])
-    })
+# 集計期間、利回り、インフレ率
+st.session_state.sim_params["years"] = st.sidebar.slider("⏳ 運用・集計期間 (年)", 1, 50, st.session_state.sim_params["years"])
+st.session_state.sim_params["rate"] = st.sidebar.slider("📈 想定利回り (%)", 0.0, 15.0, st.session_state.sim_params["rate"], step=0.1)
+st.session_state.sim_params["inflation"] = st.sidebar.slider("📉 想定インフレ率 (%)", 0.0, 10.0, st.session_state.sim_params["inflation"], step=0.1)
 
 st.sidebar.markdown("---")
 
-st.sidebar.markdown("---")
+# --- データポータビリティ（最下部） ---
 st.sidebar.markdown("### 📥 データポータビリティ")
-csv_data = st.session_state.df.to_csv(index=False).encode('utf-8-sig')
-st.sidebar.download_button(
-    label="📦 全データをCSVとしてエクスポート",
-    data=csv_data,
-    file_name=f"manerepo_data_{datetime.date.today()}.csv",
-    mime='text/csv',
-    use_container_width=True
-)
-json_data = st.session_state.df.to_json(orient="records", force_ascii=False)
-st.sidebar.download_button(
-    label="💾 全データをJSONとしてバックアップ",
-    data=json_data,
-    file_name=f"manerepo_backup_{datetime.date.today()}.json",
-    mime='application/json',
-    use_container_width=True
-)
+col_exp1, col_exp2 = st.sidebar.columns(2)
+with col_exp1:
+    csv_data = st.session_state.df.to_csv(index=False).encode('utf-8-sig')
+    st.download_button(
+        label="📦 CSV",
+        data=csv_data,
+        file_name=f"manerepo_data_{datetime.date.today()}.csv",
+        mime='text/csv',
+        use_container_width=True
+    )
+with col_exp2:
+    json_data = st.session_state.df.to_json(orient="records", force_ascii=False)
+    st.download_button(
+        label="💾 JSON",
+        data=json_data,
+        file_name=f"manerepo_backup_{datetime.date.today()}.json",
+        mime='application/json',
+        use_container_width=True
+    )
 
 st.sidebar.markdown("---")
-
-with st.sidebar.expander("⚙️ 固定費テンプレート編集", expanded=False):
-    st.caption("毎月発生する固定費の金額を調整できます。一括登録は『データ管理』タブから実行してください。")
-    if 'fixed_costs' not in st.session_state:
-        st.session_state.fixed_costs = [item.copy() for item in FIXED_COST_TEMPLATE]
-    for idx, item in enumerate(st.session_state.fixed_costs):
-        item["金額"] = st.number_input(
-            f"{item['カテゴリー']}（{item['内容']}）",
-            value=item["金額"], step=1000, key=f"fc_{idx}"
-        )
-    
-    if st.button("🔄 今月の固定費を一括登録", use_container_width=True):
-        template_to_use = st.session_state.fixed_costs
-        added_rows, skipped_items = register_fixed_costs(st.session_state.df, template_to_use, USER_ID)
-        if added_rows:
-            st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(added_rows)], ignore_index=True)
-            save_data(st.session_state.df)
-            st.sidebar.success(f"✅ {len(added_rows)} 件登録完了")
-        if skipped_items:
-            st.sidebar.warning(f"⚠️ {len(skipped_items)} 件スキップ（登録済）")
-        if added_rows: st.rerun()
 
 # --- 6. メイン画面 ---
 today = datetime.date.today()
 if "view_date" not in st.session_state:
     st.session_state.view_date = today.replace(day=1)
 
-# 1. 常に「現在の月」のデータに基づいた指標を計算（ダッシュボード着地予測用）
+# --- 1. 常に「現在の月」のデータに基づいた指標を計算（ダッシュボード着地予測用）
 curr_summaries = calculate_summaries(st.session_state.df, today)
 actual_balance_current = curr_summaries.get('balance', 0)
 
 # 2. 表示月（ナビゲーションで変更可能）に基づいた指標を計算（タブ内表示用）
 summaries = calculate_summaries(st.session_state.df, st.session_state.view_date)
 
+# 変数のグローバル初期化（NameError対策）
 income = summaries.get('income', 0)
 outgo = summaries.get('outgo', 0)
 balance = summaries.get('balance', 0)
@@ -1131,6 +1137,8 @@ last_month_df = summaries.get('last_month_df', pd.DataFrame())
 total_records = summaries.get('total_records', 0)
 total_income_all = summaries.get('total_income_all', 0)
 total_expense = summaries.get('total_expense', 0)
+current_net_worth = 0
+predicted_net_worth = 0
 
 # 財務コンサルタントによる診断ロジックの実行 (dashboadでも使用するため早めに実行)
 cfp = generate_cfp_diagnosis(
@@ -1143,12 +1151,12 @@ cfp = generate_cfp_diagnosis(
 
 label_inc = get_label("income")
 label_exp = get_label("expense")
-st.markdown(f"# 💰 マネレポ AI 財テクくん ({st.session_state.business_type}モード)")
+st.title("Manerepo - 次世代家計簿・資産管理プラットフォーム")
+st.subheader(f"💼 {st.session_state.business_type}モード")
 
 # --- リアルタイム統合メトリック（着地予測） ---
 if not st.session_state.df.empty:
     # PL目線(収支)とBS目線(純資産)の統合：着地予測純資産の計算
-    current_net_worth = 0
     if not st.session_state.assets_df.empty:
         temp_assets = st.session_state.assets_df.copy()
         temp_assets["実額"] = temp_assets.apply(lambda r: r["金額"] if "資産" in str(r["区分"]) else -r["金額"], axis=1)
@@ -1181,9 +1189,9 @@ if not st.session_state.df.empty:
         if not st.session_state.is_synced:
             st.info("🔄 **オフラインモード**: 現在データをローカルに保存しています。接続復帰時に自動同期されます。")
 else:
-    st.warning("👋 **Welcome!** まだデータがありません。サイドバーの「クイック入力」または「データ管理」タブからCSVインポートをして、あなた専用の財務分析を開始しましょう！")
+    st.warning("👋 **Welcome!** まだデータがありません。「⚙️ データ管理」タブからCSVインポートをして、あなた専用の財務分析を開始しましょう！")
 
-tab0, tab1, tab_ai, tab_bs, tab2, tab3, tab4 = st.tabs(["📝 記録する", "🏆 診断・スコア", "🤖 AIアドバイス", "🏦 純資産(BS)", "📊 財務分析", "📈 投資シミュ", "⚙️ データ管理"])
+tab1, tab_ai, tab_bs, tab2, tab3, tab4 = st.tabs(["🏆 診断・スコア", "🤖 AIアドバイス", "🏦 純資産(BS)", "📊 財務分析", "📈 投資シミュ", "⚙️ データ管理"])
 
 # 財務コンサルタントによる診断ロジックの実行
 cfp = generate_cfp_diagnosis(
@@ -1195,43 +1203,6 @@ cfp = generate_cfp_diagnosis(
 )
 
 
-
-# ================================================================
-# Tab 0: 記録する (スマホUX特化)
-# ================================================================
-with tab0:
-    st.markdown('<div class="section-header">✏️ 手動で家計を記録</div>', unsafe_allow_html=True)
-    
-    in_out = st.radio("タイプ", ["支出", "収入"], horizontal=True, key="manual_type")
-    d = st.date_input("📅 日付", value=today, key="manual_date")
-    
-    st.markdown("📂 **カテゴリーを選択**")
-    if in_out == "支出":
-        cat_clean = st.radio("支出カテゴリ", EXPENSE_CATEGORIES, horizontal=True, label_visibility="collapsed", key="manual_exp_cat")
-    else:
-        cat_clean = st.radio("収入カテゴリ", INCOME_CATEGORIES, horizontal=True, label_visibility="collapsed", key="manual_inc_cat")
-        
-    mem = st.text_input("📝 内容（オプション）", key="manual_memo")
-    tag_clean = st.radio("🏷 性質", CONSUMPTION_TAGS, horizontal=True, key="manual_tag") if in_out == "支出" else "収入"
-    amt = st.number_input("💰 金額 (円)", min_value=0, step=100, value=0, key="manual_amt")
-    
-    if st.button("✅ 記録を保存する", use_container_width=True, key="manual_save_btn"):
-         if amt <= 0:
-             st.error("⚠️ エラー: 金額には1円以上の数値を入力してください。")
-         elif d > today:
-             st.error("⚠️ エラー: 未来の日付は登録できません。")
-         else:
-             if not mem:
-                 mem = "（未入力）"
-             tag = tag_clean if in_out == "支出" else "収入"
-             new_row = pd.DataFrame([{"user_id": USER_ID, "日付": d, "タイプ": in_out, "カテゴリー": cat_clean, "内容": mem, "金額": amt, "性質": tag}])
-             st.session_state.df = pd.concat([st.session_state.df, new_row], ignore_index=True)
-             save_data(st.session_state.df)
-             st.success(f"✅ {d} の {cat_clean} ({amt}円) を保存しました！")
-             st.rerun()
-
-                
-    st.markdown("<br>", unsafe_allow_html=True)
 
 # ================================================================
 # Tab 1: 診断・スコア
