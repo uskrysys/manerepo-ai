@@ -1,6 +1,6 @@
 streamlit
 pandas
 plotly
-fpdf2
+yfinance
 supabase
 python-dotenv
