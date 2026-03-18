@@ -1,6 +1,6 @@
 streamlit
 pandas
 plotly
-yfinance
 supabase
 python-dotenv
+streamlit-authenticator
