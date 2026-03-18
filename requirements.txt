@@ -1,6 +1,7 @@
 streamlit
 pandas
+numpy
 plotly
-supabase
-python-dotenv
 streamlit-authenticator
+supabase
+fpdf2
