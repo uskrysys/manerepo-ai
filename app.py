@@ -13,6 +13,7 @@ import streamlit_authenticator as stauth
 import yaml
 from yaml.loader import SafeLoader
 import numpy as np
+import streamlit.components.v1 as components
 # --- 1. ページ設定 ---
 st.set_page_config(page_title="Manerepo - 次世代家計簿・資産管理プラットフォーム", layout="wide", page_icon="💰")
 
@@ -56,6 +57,34 @@ if 'sim_params' not in st.session_state:
         'inflation': 2.0,
         'use_tax': False
     }
+if 'selected_date' not in st.session_state:
+    st.session_state.selected_date = datetime.date.today()
+if 'qi_date_input' not in st.session_state:
+    st.session_state.qi_date_input = datetime.date.today()
+if 'switch_to_tab' not in st.session_state:
+    st.session_state.switch_to_tab = None
+if 'monthly_savings_target' not in st.session_state:
+    st.session_state.monthly_savings_target = 30000
+if 'first_load_tab' not in st.session_state:
+    st.session_state.first_load_tab = True
+    st.session_state.switch_to_tab = 0  # 0 is '📝 データ管理'
+
+
+def switch_tab_js(tab_index: int):
+    """JavaScriptを使ってStreamlitのタブをプログラム的に切り替える"""
+    js = f"""
+    <script>
+        function clickTab() {{
+            var tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
+            if (tabs.length > {tab_index}) {{
+                tabs[{tab_index}].click();
+            }}
+        }}
+        // DOMの描画完了を待ってからクリック
+        setTimeout(clickTab, 100);
+    </script>
+    """
+    components.html(js, height=0, width=0)
 
 # --- 定数定義 ---
 CURRENCY = "円"
@@ -350,6 +379,16 @@ def main_app_logic(user_id):
     st.session_state.sim_params["years"] = st.sidebar.slider("⏳ 運用・集計期間 (年)", 1, 50, st.session_state.sim_params["years"])
     st.session_state.sim_params["rate"] = st.sidebar.slider("📈 想定利回り (%)", 0.0, 15.0, st.session_state.sim_params["rate"], step=0.1)
     st.session_state.sim_params["inflation"] = st.sidebar.slider("📉 想定インフレ率 (%)", 0.0, 10.0, st.session_state.sim_params["inflation"], step=0.1)
+    
+    st.sidebar.markdown("### 🎯 毎月の黒字目標")
+    st.session_state.monthly_savings_target = st.sidebar.number_input(
+        "目標毎月黒字額 (円)", 
+        min_value=0, 
+        max_value=1000000, 
+        value=st.session_state.monthly_savings_target, 
+        step=5000,
+        help="収入－支出で毎月この額を黒字にする目標です"
+    )
     
     st.sidebar.markdown("---")
 
@@ -1347,7 +1386,13 @@ def main_app_logic(user_id):
         st.warning("👋 **Welcome!** まだデータがありません。「⚙️ データ管理」タブからCSVインポートをして、あなた専用の財務分析を開始しましょう！")
     
 
-    tab1, tab_ai, tab_bs, tab2, tab3, tab4 = st.tabs(["🏆 診断・スコア", "🤖 AIアドバイス", "🏦 純資産(BS)", "📊 財務分析", "📈 投資シミュ", "⚙️ データ管理"])
+    tab4, tab1, tab_ai, tab_bs, tab2, tab3 = st.tabs(["📝 データ管理", "🏆 診断・スコア", "🤖 AIアドバイス", "🏦 純資産(BS)", "📊 財務分析", "📈 投資シミュ"])
+
+    # --- タブ自動切り替えロジック ---
+    if st.session_state.switch_to_tab is not None:
+        target_tab = st.session_state.switch_to_tab
+        st.session_state.switch_to_tab = None  # 消費（無限ループ防止）
+        switch_tab_js(target_tab)
 
     with tab1:
         # --- 月移動ナビゲーション ---
@@ -1378,6 +1423,65 @@ def main_app_logic(user_id):
             lm_balance = lm_income - lm_outgo
             delta_balance = balance - lm_balance if (lm_income > 0 or lm_outgo > 0) else None
             st.metric(f"⚖️ {label_bal}", f"{balance:,.0f} 円", delta=f"{delta_balance:+,.0f} 円" if delta_balance is not None else None)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ================================================================
+        # 🎯 今月の目標プログレスバー
+        # ================================================================
+        st.markdown('<div class="section-header">🎯 今月の黒字目標達成度</div>', unsafe_allow_html=True)
+        
+        savings_target = st.session_state.monthly_savings_target
+        
+        if income > 0 or outgo > 0:
+            # 進捗計算
+            if savings_target > 0:
+                progress_ratio = balance / savings_target
+                progress_pct = max(0.0, min(1.0, progress_ratio))
+                remaining = savings_target - balance
+                
+                # 色の決定
+                if progress_ratio >= 1.0:
+                    bar_color = "#34c759"  # 達成！
+                    status_icon = "🎉"
+                    status_text = f"目標 {savings_target:,.0f}円 を達成しました！お見事！"
+                elif progress_ratio >= 0.7:
+                    bar_color = "#0071e3"  # 順調
+                    status_icon = "💪"
+                    status_text = f"あと {remaining:,.0f}円で目標達成！この調子！"
+                elif progress_ratio >= 0.3:
+                    bar_color = "#ff9500"  # 道半ば
+                    status_icon = "📊"
+                    status_text = f"目標まであと {remaining:,.0f}円。支出の見直しを検討しましょう。"
+                else:
+                    bar_color = "#ff3b30" if balance < 0 else "#ff9500"
+                    status_icon = "⚠️" if balance < 0 else "📈"
+                    if balance < 0:
+                        status_text = f"現在 {abs(balance):,.0f}円 の赤字です。対策が必要です。"
+                    else:
+                        status_text = f"目標まであと {remaining:,.0f}円。ペースを上げましょう！"
+                
+                # プログレスバー表示
+                st.markdown(f"""
+                <div style="background:white; border-radius:16px; padding:20px; border:1px solid #e5e5ea; box-shadow:0 2px 12px rgba(0,0,0,0.04); margin-bottom:16px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                        <div style="font-weight:600; color:#1d1d1f; font-size:15px;">{status_icon} {status_text}</div>
+                        <div style="font-weight:700; color:{bar_color}; font-size:1.3rem;">{balance:,.0f}円 <span style="font-size:0.8rem; color:#86868b;">/ {savings_target:,.0f}円</span></div>
+                    </div>
+                    <div style="width:100%; height:20px; background-color:#e5e5ea; border-radius:10px; overflow:hidden;">
+                        <div style="width:{progress_pct * 100:.1f}%; height:100%; background:linear-gradient(90deg, {bar_color}, {bar_color}cc); border-radius:10px; transition: width 0.5s ease;"></div>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; margin-top:6px; font-size:12px; color:#86868b;">
+                        <span>収入: <span style="color:#34c759; font-weight:600;">{income:,.0f}円</span></span>
+                        <span>支出: <span style="color:#ff3b30; font-weight:600;">{outgo:,.0f}円</span></span>
+                        <span>達成率: <span style="font-weight:600;">{min(100, progress_ratio * 100):.0f}%</span></span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.info("💡 サイドバーで「毎月の黒字目標」を設定すると、プログレスバーが表示されます。")
+        else:
+            st.info("💡 収支データを入力すると、目標進捗が表示されます。")
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1514,104 +1618,126 @@ def main_app_logic(user_id):
         if FPDF_AVAILABLE:
             if st.button("📄 AI診断レポートを作成", key="btn_pdf_gen"):
                 with st.spinner("思考中...AI財テクくんがデータ分析を実行しています..."):
-                        try:
-                            pdf = FPDF()
-                            pdf.add_page()
+                    try:
+                        pdf = FPDF()
+                        pdf.add_page()
 
-                            # --- デプロイ環境(Streamlit Cloud等)に対応するための強力なフォント探索ロジック ---
-                            base_dir = os.path.dirname(__file__)
-                            font_candidates = [
-                                os.path.join(base_dir, "fonts", "ipaexg.ttf"),
-                                os.path.join(base_dir, "fonts", "MPLUS1p-Regular.ttf"),
-                                os.path.join(base_dir, "ipaexg.ttf"), # 同一ディレクトリ内
-                                "C:\\Windows\\Fonts\\msgothic.ttc",   # Windowsローカル用
-                                "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf" # Linux用
-                            ]
+                        # --- デプロイ環境(Streamlit Cloud等)に対応するための強力なフォント探索ロジック ---
+                        base_dir = os.path.dirname(os.path.abspath(__file__))
+                        font_candidates = [
+                            # ★ プロジェクト内に確認済のフォントを最優先
+                            os.path.join(base_dir, "fonts", "MPLUS1p-Regular.ttf"),
+                            os.path.join(base_dir, "fonts", "ipaexg.ttf"),
+                            os.path.join(base_dir, "fonts", "NotoSansJP-Regular.ttf"),
+                            os.path.join(base_dir, "ipaexg.ttf"),
+                            # Windowsローカル
+                            "C:\\Windows\\Fonts\\msgothic.ttc",
+                            "C:\\Windows\\Fonts\\meiryo.ttc",
+                            # Linux (Streamlit Cloud等)
+                            "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf",
+                            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+                        ]
 
-                            font_path_to_use = None
-                            for path in font_candidates:
+                        font_path_to_use = None
+                        for path in font_candidates:
+                            try:
                                 if os.path.exists(path):
+                                    # .ttc ファイルはfpdf2で扱えない場合があるので.ttfを優先
                                     font_path_to_use = path
                                     break
+                            except Exception:
+                                continue
 
-                            has_japanese_font = False
-                            font_name = "helvetica"
+                        has_japanese_font = False
+                        font_name = "helvetica"
 
-                            if font_path_to_use:
-                                try:
-                                    pdf.add_font("jp_font", "", font_path_to_use, uni=True)
-                                    font_name = "jp_font"
-                                    has_japanese_font = True
-                                except Exception as font_err:
-                                    st.error(f"デバッグログ（開発者向け）: 選択されたフォント '{font_path_to_use}' の追加に失敗しました。詳細: {font_err}")
-                            else:
-                                st.warning("⚠️ 日本語フォントファイルが見つかりません。PDFの一部が文字化けする可能性があります。(プロジェクトの fonts/ フォルダに ipaexg.ttf 等が含まれているか確認してください)")
+                        if font_path_to_use:
+                            try:
+                                pdf.add_font("jp_font", "", font_path_to_use, uni=True)
+                                font_name = "jp_font"
+                                has_japanese_font = True
+                                st.caption(f"📎 使用フォント: {os.path.basename(font_path_to_use)}")
+                            except Exception as font_err:
+                                st.warning(f"⚠️ フォント '{os.path.basename(font_path_to_use)}' の読み込みに失敗しました。㎢次のフォントを試します... ({font_err})")
+                                # 失敗時は次の候補を試す
+                                for fallback in font_candidates:
+                                    if fallback != font_path_to_use:
+                                        try:
+                                            if os.path.exists(fallback):
+                                                pdf.add_font("jp_font_fb", "", fallback, uni=True)
+                                                font_name = "jp_font_fb"
+                                                has_japanese_font = True
+                                                break
+                                        except Exception:
+                                            continue
+                        else:
+                            st.warning("⚠️ 日本語フォントが見つかりません。`fonts/` フォルダに MPLUS1p-Regular.ttf 等を配置してください。")
 
-                            if not has_japanese_font:
-                                pdf.set_font("helvetica", size=16)
-                                pdf.cell(200, 10, txt="AI Report", ln=True, align="C")
-                            else:
-                                pdf.set_font(font_name, size=16)
-                                pdf.cell(200, 10, txt=" マネレポ AI ガチ診断レポート", ln=True, align="C")
-                                pdf.set_font(font_name, size=12)
+                        if not has_japanese_font:
+                            pdf.set_font("helvetica", size=16)
+                            pdf.cell(200, 10, txt="AI Report", ln=True, align="C")
+                        else:
+                            pdf.set_font(font_name, size=16)
+                            pdf.cell(200, 10, txt=" マネレポ AI ガチ診断レポート", ln=True, align="C")
+                            pdf.set_font(font_name, size=12)
 
+                        pdf.ln(10)
 
-                            pdf.ln(10)
+                        if has_japanese_font:
+                            pdf.cell(200, 10, txt=f"【対象月】 {st.session_state.view_date.year}年{st.session_state.view_date.month}月", ln=True)
+                            pdf.cell(200, 10, txt=f"収入: {income:,.0f}円 / 支出: {outgo:,.0f}円 / 収支: {balance:,.0f}円", ln=True)
+                        else:
+                            pdf.cell(200, 10, txt=f"Month: {st.session_state.view_date.year}-{st.session_state.view_date.month}", ln=True)
+                            pdf.cell(200, 10, txt=f"Income: {income:,.0f} / Expense: {outgo:,.0f} / Balance: {balance:,.0f}", ln=True)
+                        pdf.ln(5)
 
+                        if outgo > 0:
+                            top_exp = this_month_df[this_month_df["タイプ"] == "支出"].groupby("カテゴリー")["金額"].sum().nlargest(3)
                             if has_japanese_font:
-                                pdf.cell(200, 10, txt=f"【対象月】 {st.session_state.view_date.year}年{st.session_state.view_date.month}月", ln=True)
-                                pdf.cell(200, 10, txt=f"収入: {income:,.0f}円 / 支出: {outgo:,.0f}円 / 収支: {balance:,.0f}円", ln=True)
+                                pdf.cell(190, 10, txt="■ 支出ワースト3カテゴリー：", ln=True)
+                                for cat, amt in top_exp.items():
+                                    pdf.cell(190, 10, txt=f"  - {cat}: {amt:,.0f}円", ln=True)
                             else:
-                                pdf.cell(200, 10, txt=f"Month: {st.session_state.view_date.year}-{st.session_state.view_date.month}", ln=True)
-                                pdf.cell(200, 10, txt=f"Income: {income:,.0f} / Expense: {outgo:,.0f} / Balance: {balance:,.0f}", ln=True)
+                                pdf.cell(190, 10, txt="Top 3 Expenses:", ln=True)
+                                for cat, amt in top_exp.items():
+                                    pdf.cell(190, 10, txt=f"  - {cat}: {amt:,.0f}", ln=True)
                             pdf.ln(5)
 
-                            if outgo > 0:
-                                top_exp = this_month_df[this_month_df["タイプ"] == "支出"].groupby("カテゴリー")["金額"].sum().nlargest(3)
-                                if has_japanese_font:
-                                    pdf.cell(190, 10, txt="■ 支出ワースト3カテゴリー：", ln=True)
-                                    for cat, amt in top_exp.items():
-                                        pdf.cell(190, 10, txt=f"  - {cat}: {amt:,.0f}円", ln=True)
+                            if has_japanese_font:
+                                pdf.cell(190, 10, txt="■ 💡 マネレポ AI プロフェッショナル診断アドバイス：", ln=True)
+                                pdf.set_font(font_name, size=11)
+                                for advice in cfp['advices']:
+                                    pdf.multi_cell(w=190, h=8, txt=f"・{advice}", ln=1)
+
+                                pdf.ln(3)
+                                pdf.multi_cell(w=190, h=8, txt="【財務指標の定量評価】", ln=1)
+                                pdf.set_font(font_name, size=10)
+                                pdf.multi_cell(w=190, h=7, txt=f"  - 貯蓄率: {cfp['savings_rate']:.1f}% (目標20%)", ln=1)
+                                pdf.multi_cell(w=190, h=7, txt=f"  - 固定費比率: {cfp['fixed_ratio']:.1f}% (機動力: {cfp['flexibility']:.1f}%)", ln=1)
+                                pdf.multi_cell(w=190, h=7, txt=f"  - 安全余裕率: {cfp['safety_margin']:.1f}%", ln=1)
+                                pdf.multi_cell(w=190, h=7, txt=f"  - 資産配分（投資比率）: {cfp['invest_ratio']:.1f}%", ln=1)
+
+                                pdf.ln(3)
+                                pdf.multi_cell(w=190, h=8, txt="【総評】", ln=1)
+                                if cfp['savings_rate'] < 10:
+                                    pdf.multi_cell(w=190, h=8, txt="・キャッシュフローの安全性が懸念されます。固定費の削減および損益分岐点の引き下げを断行してください。", ln=1)
                                 else:
-                                    pdf.cell(190, 10, txt="Top 3 Expenses:", ln=True)
-                                    for cat, amt in top_exp.items():
-                                        pdf.cell(190, 10, txt=f"  - {cat}: {amt:,.0f}", ln=True)
-                                pdf.ln(5)
+                                    pdf.multi_cell(w=190, h=8, txt="・財務構造は安定しています。税効果の最適化に向けた長期資産運用の配分維持を推奨します。", ln=1)
 
-                                if has_japanese_font:
-                                    pdf.cell(190, 10, txt="■ 💡 マネレポ AI プロフェッショナル診断アドバイス：", ln=True)
-                                    pdf.set_font(font_name, size=11)
-                                    for advice in cfp['advices']:
-                                        pdf.multi_cell(w=190, h=8, txt=f"・{advice}", ln=1)
-
-                                    pdf.ln(3)
-                                    pdf.multi_cell(w=190, h=8, txt="【財務指標の定量評価】", ln=1)
-                                    pdf.set_font(font_name, size=10)
-                                    pdf.multi_cell(w=190, h=7, txt=f"  - 貯蓄率: {cfp['savings_rate']:.1f}% (目標20%)", ln=1)
-                                    pdf.multi_cell(w=190, h=7, txt=f"  - 固定費比率: {cfp['fixed_ratio']:.1f}% (機動力: {cfp['flexibility']:.1f}%)", ln=1)
-                                    pdf.multi_cell(w=190, h=7, txt=f"  - 安全余裕率: {cfp['safety_margin']:.1f}%", ln=1)
-                                    pdf.multi_cell(w=190, h=7, txt=f"  - 資産配分（投資比率）: {cfp['invest_ratio']:.1f}%", ln=1)
-
-                                    pdf.ln(3)
-                                    pdf.multi_cell(w=190, h=8, txt="【総評】", ln=1)
-                                    if cfp['savings_rate'] < 10:
-                                        pdf.multi_cell(w=190, h=8, txt="・キャッシュフローの安全性が懸念されます。固定費の削減および損益分岐点の引き下げを断行してください。", ln=1)
-                                    else:
-                                        pdf.multi_cell(w=190, h=8, txt="・財務構造は安定しています。税効果の最適化に向けた長期資産運用の配分維持を推奨します。", ln=1)
-
+                        else:
+                            if has_japanese_font:
+                                pdf.cell(190, 10, txt="データが不足しているため詳細な分析ができません。", ln=True)
                             else:
-                                if has_japanese_font:
-                                    pdf.cell(190, 10, txt="データが不足しているため詳細な分析ができません。", ln=True)
-                                else:
-                                    pdf.cell(190, 10, txt="Not enough data for detailed analysis.", ln=True)
+                                pdf.cell(190, 10, txt="Not enough data for detailed analysis.", ln=True)
 
-                            pdf_output = pdf.output(dest="S")
-                            b64 = base64.b64encode(pdf_output).decode()
-                            href = f'<a download="diagnosis_report.pdf" href="data:application/pdf;base64,{b64}" style="text-decoration:none;"><button style="background-color:#1b5e20;color:white;padding:10px 20px;border:none;border-radius:25px;font-weight:bold;cursor:pointer;">📥 レポートをダウンロード</button></a>'
-                            st.markdown(href, unsafe_allow_html=True)
-                            st.success("レポートの作成が完了しました。")
-                        except Exception as e:
-                            st.error(f"PDF生成エラー: {e}")
+                        pdf_output = pdf.output(dest="S")
+                        b64 = base64.b64encode(pdf_output).decode()
+                        href = f'<a download="diagnosis_report.pdf" href="data:application/pdf;base64,{b64}" style="text-decoration:none;"><button style="background-color:#1b5e20;color:white;padding:10px 20px;border:none;border-radius:25px;font-weight:bold;cursor:pointer;">📥 レポートをダウンロード</button></a>'
+                        st.markdown(href, unsafe_allow_html=True)
+                        st.success("レポートの作成が完了しました。")
+                    except Exception as e:
+                        st.error(f"PDF生成エラー: {e}")
         else:
             st.info("PDF生成機能を利用するには fpdf2 のインストールが必要です。")
 
@@ -1656,45 +1782,7 @@ def main_app_logic(user_id):
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # --- 収支カレンダー ---
-        st.markdown('<div class="section-header">📆 収支カレンダー</div>', unsafe_allow_html=True)
-        cal = calendar.monthcalendar(st.session_state.view_date.year, st.session_state.view_date.month)
-        spent_days = set(this_month_df[this_month_df["タイプ"] == "支出"]["日付"].apply(lambda x: x.day)) if (isinstance(this_month_df, pd.DataFrame) and not this_month_df.empty) else set()
-        income_days = set(this_month_df[this_month_df["タイプ"] == "収入"]["日付"].apply(lambda x: x.day)) if (isinstance(this_month_df, pd.DataFrame) and not this_month_df.empty) else set()
-        weekdays = ["月", "火", "水", "木", "金", "土", "日"]
-
-        cal_html = '<table class="cal-table"><tr>'
-        for wd in weekdays: cal_html += f'<th>{wd}</th>'
-        cal_html += '</tr>'
-        for week in cal:
-            cal_html += '<tr>'
-            for day in week:
-                if day == 0:
-                    cal_html += '<td style="background:transparent;"></td>'
-                else:
-                    classes = []
-                    has_spent = day in spent_days
-                    has_income = day in income_days
-
-                    # 色分けクラスの選定
-                    if has_spent and has_income: classes.append("cal-both")
-                    elif has_spent: classes.append("cal-spent")
-                    elif has_income: classes.append("cal-income")
-
-                    # 今日の判定
-                    is_today = (day == datetime.date.today().day and 
-                               st.session_state.view_date.month == datetime.date.today().month and 
-                               st.session_state.view_date.year == datetime.date.today().year)
-                    if is_today: classes.append("cal-today")
-
-                    cls = ' '.join(classes)
-                    cal_html += f'<td class="{cls}">{day}</td>'
-            cal_html += '</tr>'
-        cal_html += '</table>'
-        st.markdown(cal_html, unsafe_allow_html=True)
-        st.caption("🟥赤 = 支出　🟩緑 = 収入　🟥🟩半分ずつ = 支出・収入両方あり")
-
-        st.markdown("<br>", unsafe_allow_html=True)
+        # カレンダー部分はタブ1から削除されました
 
         # --- 当月の収支明細 ---
         st.markdown('<div class="section-header">📋 直近の取引明細</div>', unsafe_allow_html=True)
@@ -2401,44 +2489,204 @@ def main_app_logic(user_id):
 
 
     with tab4:
-        # --- 固定費一括登録セクション ---
+        # --- 収支カレンダー（クリック連動機能付き） ---
+        st.markdown('<div class="section-header">📆 収支カレンダー <span style="font-size:0.7em; color:#86868b; font-weight:400;">日付をクリックすると↓の入力フォームに連動します</span></div>', unsafe_allow_html=True)
+        cal = calendar.monthcalendar(st.session_state.view_date.year, st.session_state.view_date.month)
+        spent_days = set(this_month_df[this_month_df["タイプ"] == "支出"]["日付"].apply(lambda x: x.day)) if (isinstance(this_month_df, pd.DataFrame) and not this_month_df.empty) else set()
+        income_days = set(this_month_df[this_month_df["タイプ"] == "収入"]["日付"].apply(lambda x: x.day)) if (isinstance(this_month_df, pd.DataFrame) and not this_month_df.empty) else set()
+        weekdays = ["月", "火", "水", "木", "金", "土", "日"]
+
+        # 曜日ヘッダー
+        wd_cols = st.columns(7)
+        for i, wd in enumerate(weekdays):
+            wd_color = "#ff3b30" if i == 6 else ("#0071e3" if i == 5 else "#86868b")
+            wd_cols[i].markdown(f'<div style="text-align:center; font-size:12px; font-weight:600; color:{wd_color}; padding:4px 0;">{wd}</div>', unsafe_allow_html=True)
+
+        # カレンダー本体（ボタン式）
+        for week in cal:
+            week_cols = st.columns(7)
+            for i, day in enumerate(week):
+                with week_cols[i]:
+                    if day == 0:
+                        st.write("")
+                    else:
+                        has_spent = day in spent_days
+                        has_income = day in income_days
+                        is_today = (day == datetime.date.today().day and 
+                                   st.session_state.view_date.month == datetime.date.today().month and 
+                                   st.session_state.view_date.year == datetime.date.today().year)
+                        is_selected = (hasattr(st.session_state, 'selected_date') and
+                                      st.session_state.selected_date.day == day and
+                                      st.session_state.selected_date.month == st.session_state.view_date.month and
+                                      st.session_state.selected_date.year == st.session_state.view_date.year)
+
+                        # 表示用のアイコンと色
+                        if has_spent and has_income:
+                            indicator = "🔵"
+                        elif has_spent:
+                            indicator = "🔴"
+                        elif has_income:
+                            indicator = "🟢"
+                        else:
+                            indicator = ""
+
+                        if st.button(
+                            f"{day}", 
+                            key=f"cal_day_{st.session_state.view_date.year}_{st.session_state.view_date.month}_{day}_tab4",
+                            use_container_width=True,
+                            help=f"{st.session_state.view_date.year}/{st.session_state.view_date.month}/{day} の取引を入力"
+                        ):
+                            clicked_date = datetime.date(
+                                st.session_state.view_date.year,
+                                st.session_state.view_date.month,
+                                day
+                            )
+                            st.session_state.selected_date = clicked_date
+                            st.session_state.qi_date_input = clicked_date
+                            st.rerun()
+                        # 日付セルの下にインジケーター表示
+                        if indicator:
+                            st.markdown(f'<div style="text-align:center; font-size:10px; margin-top:-8px;">{indicator}</div>', unsafe_allow_html=True)
+
+        st.caption("🔴 支出あり　🟢 収入あり　🔵 両方あり　｜　👆 日付をクリックしてサクッと記録！")
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ================================================================
+        # クイック入力フォーム（カレンダー連動・スマホ最適化）
+        # ================================================================
+        st.markdown('<div class="section-header">✏️ 取引を記録する</div>', unsafe_allow_html=True)
+
+        with st.form(key="quick_input_form", clear_on_submit=True):
+            # --- 必須項目（常に表示） ---
+            qi_row1_c1, qi_row1_c2 = st.columns(2)
+            with qi_row1_c1:
+                qi_date = st.date_input(
+                    "📅 日付 *", 
+                    key="qi_date_input"
+                )
+            with qi_row1_c2:
+                qi_type = st.selectbox("🔄 収支タイプ *", ["支出", "収入"], key="qi_type")
+                if qi_type == "収入":
+                     st.markdown("<div style='color:#34c759; font-weight:600; font-size:13px; margin-top:-10px; margin-bottom:10px;'>🟢 収入（プラス）として記録されます</div>", unsafe_allow_html=True)
+                else:
+                     st.markdown("<div style='color:#ff3b30; font-weight:600; font-size:13px; margin-top:-10px; margin-bottom:10px;'>🔴 支出（マイナス）として記録されます</div>", unsafe_allow_html=True)
+
+            qi_row2_c1, qi_row2_c2 = st.columns(2)
+            with qi_row2_c1:
+                if qi_type == "支出":
+                    qi_category = st.selectbox("📂 カテゴリー *", EXPENSE_CATEGORIES, key="qi_cat")
+                else:
+                    qi_category = st.selectbox("📂 カテゴリー *", INCOME_CATEGORIES, key="qi_cat")
+            with qi_row2_c2:
+                qi_amount = st.number_input("💰 金額 (円) *", min_value=0, step=100, value=0, key="qi_amount")
+
+            # --- 任意項目（折りたたみ） ---
+            with st.expander("＋ 詳細を追加（メモ・性質タグ）"):
+                qi_content = st.text_input("📝 メモ・内容", placeholder="例: スーパーで買い物", key="qi_content")
+                if qi_type == "支出":
+                    qi_nature = st.selectbox("🏷️ 性質タグ", CONSUMPTION_TAGS, key="qi_nature")
+                else:
+                    qi_nature = "収入"
+                    st.caption("💡 収入の性質タグは自動設定されます")
+
+            submitted = st.form_submit_button("💾 登録する", use_container_width=True, type="primary")
+            if submitted:
+                # バリデーション（必須項目チェック）
+                errors = []
+                if qi_amount <= 0:
+                    errors.append("⚠️ 金額は1円以上を入力してください。")
+                if not qi_category or qi_category.strip() == "":
+                    errors.append("⚠️ カテゴリーを選択してください。")
+                if not qi_date:
+                    errors.append("⚠️ 日付を入力してください。")
+                
+                if errors:
+                    for err in errors:
+                        st.error(err)
+                else:
+                    # 内容が空の場合はカテゴリー名を自動補完
+                    final_content = qi_content.strip() if qi_content and qi_content.strip() else qi_category
+                    new_row = {
+                        "user_id": st.session_state.get("username", user_id),
+                        "日付": qi_date,
+                        "タイプ": qi_type,
+                        "カテゴリー": qi_category,
+                        "内容": final_content,
+                        "金額": int(qi_amount),
+                        "性質": qi_nature
+                    }
+                    try:
+                        st.session_state.df = pd.concat(
+                            [st.session_state.df, pd.DataFrame([new_row])], 
+                            ignore_index=True
+                        )
+                        save_data(st.session_state.df, st.session_state["username"])
+                        st.toast(f"✅ {qi_date} の {qi_type}「{final_content}」{qi_amount:,}円 を登録しました！")
+                        # 送信後もカレンダーで選択中の日付を維持（clear_on_submit対策）
+                        st.session_state.qi_date_input = st.session_state.selected_date
+                        # 診断・スコアタブ（インデックス 1）へ自動遷移
+                        st.session_state.switch_to_tab = 1
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"⚠️ データの保存に失敗しました。時間をおいて再度お試しください。\n詳細: {e}")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # --- 固定費一括登録セクション（編集可能） ---
         st.markdown('<div class="section-header">📌 今月の固定費を一括登録</div>', unsafe_allow_html=True)
-        st.caption("サイドバーで設定した固定費テンプレートを、今月1日付けで一括登録します。同じ月に既に登録済みの項目は自動的にスキップされます。")
+        st.caption("固定費テンプレートを元に、今月1日付けで一括登録します。金額はその場で調整できます。登録済の項目は自動スキップ。")
 
         template_to_use = st.session_state.get('fixed_costs', FIXED_COST_TEMPLATE)
+        total_fixed = sum(item['金額'] for item in template_to_use)
 
-        # テンプレートのプレビュー
-        preview_cols = st.columns(len(template_to_use))
-        for idx, item in enumerate(template_to_use):
-            with preview_cols[idx]:
-                st.markdown(f"""<div class="metric-card" style="border-left-color:#7986cb; padding:12px;">
-                    <div class="label" style="font-size:0.75rem;">{item['カテゴリー']}</div>
-                    <div style="font-weight:700; color:#1b5e20; font-size:0.85rem;">{item['内容']}</div>
-                    <div style="font-weight:800; color:#5c6bc0;">¥{item['金額']:,}</div>
-                </div>""", unsafe_allow_html=True)
+        # 編集可能なテンプレートプレビューと登録ボタン
+        with st.expander(f"📝 テンプレート確認・編集（合計 ¥{total_fixed:,}）", expanded=False):
+            template_df = pd.DataFrame(template_to_use)
+            edited_template = st.data_editor(
+                template_df,
+                use_container_width=True,
+                num_rows="dynamic",
+                column_config={
+                    "カテゴリー": st.column_config.SelectboxColumn("カテゴリー", options=EXPENSE_CATEGORIES),
+                    "内容": st.column_config.TextColumn("内容"),
+                    "金額": st.column_config.NumberColumn("金額 (円)", min_value=0, step=1000, format="%d"),
+                },
+                key="fixed_cost_editor"
+            )
+            # 編集結果をテンプレートに反映
+            if not edited_template.equals(template_df):
+                st.session_state.fixed_costs = edited_template.to_dict('records')
+                template_to_use = st.session_state.fixed_costs
 
-        if st.button("🔌 今月の固定費を一括登録する", use_container_width=True, key="btn_fixed_cost_bulk"):
-            template_to_use = st.session_state.get('fixed_costs', FIXED_COST_TEMPLATE)
-            added_rows, skipped_items = register_fixed_costs(st.session_state.df, template_to_use, st.session_state["username"])
-            if added_rows:
-                st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(added_rows)], ignore_index=True)
-                save_data(st.session_state.df, USER_ID)
-                st.success(f"✅ {len(added_rows)} 件登録完了")
-            if skipped_items:
-                st.warning(f"⚠️ {len(skipped_items)} 件スキップ（登録済）")
-            if added_rows: st.rerun()
-
-        st.markdown('<div class="section-header">📋 前月の固定費から賢くコピー</div>', unsafe_allow_html=True)
-        st.caption("前月に利用した実データから、カテゴリが『固定費』のものを抽出して今月の1日にコピーします。")
-        if st.button("✨ 前月分を一括コピー (スマート複製)", use_container_width=True):
-            added_rows, skipped_items = register_fixed_costs_from_prev_month(st.session_state.df, st.session_state["username"], datetime.date.today())
-            if added_rows:
-                st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(added_rows)], ignore_index=True)
-                save_data(st.session_state.df, USER_ID)
-                st.success(f"✅ {len(added_rows)} 件をコピーしました！")
-            if skipped_items:
-                st.info(f"💡 {len(skipped_items)} 件は既に今月に存在するためスキップしました。")
-            if added_rows: st.rerun()
+        fc_col1, fc_col2 = st.columns(2)
+        with fc_col1:
+            if st.button("🔌 今月の固定費を一括登録", use_container_width=True, key="btn_fixed_cost_bulk", type="primary"):
+                try:
+                    added_rows, skipped_items = register_fixed_costs(st.session_state.df, template_to_use, st.session_state["username"])
+                    if added_rows:
+                        st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(added_rows)], ignore_index=True)
+                        save_data(st.session_state.df, st.session_state["username"])
+                        st.success(f"✅ {len(added_rows)} 件登録完了！")
+                    else:
+                        st.info("💡 全ての固定費が登録済みです。")
+                    if skipped_items:
+                        st.warning(f"⚠️ {len(skipped_items)} 件スキップ（登録済）: {', '.join(skipped_items[:3])}{'...' if len(skipped_items) > 3 else ''}")
+                    if added_rows: st.rerun()
+                except Exception as e:
+                    st.error(f"⚠️ 固定費の一括登録に失敗しました: {e}")
+        with fc_col2:
+            if st.button("✨ 前月分をコピー", use_container_width=True):
+                try:
+                    added_rows, skipped_items = register_fixed_costs_from_prev_month(st.session_state.df, st.session_state["username"], datetime.date.today())
+                    if added_rows:
+                        st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(added_rows)], ignore_index=True)
+                        save_data(st.session_state.df, st.session_state["username"])
+                        st.success(f"✅ {len(added_rows)} 件をコピーしました！")
+                    if skipped_items:
+                        st.info(f"💡 {len(skipped_items)} 件は既に今月に存在するためスキップしました。")
+                    if added_rows: st.rerun()
+                except Exception as e:
+                    st.error(f"⚠️ 前月コピーに失敗しました: {e}")
 
         st.markdown("<br>", unsafe_allow_html=True)
 
