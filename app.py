@@ -2613,24 +2613,44 @@ def main_app_logic(user_id):
 # ================================================================
 try:
     # Secretsから認証情報を取得
-    raw_creds = st.secrets['auth']['credentials']['usernames']
-    credentials = {'usernames': {}}
+    if "auth" not in st.secrets:
+        st.error("🔒 **認証設定が見つかりません**: `.streamlit/secrets.toml` に [auth] セクションが必要です。")
+        st.stop()
+        
+    auth_secrets = st.secrets["auth"]
+    
+    # 資格情報の取得
+    if "credentials" not in auth_secrets or "usernames" not in auth_secrets["credentials"]:
+        st.error("🔑 **ユーザー設定が見つかりません**: `secrets.toml` の `[auth.credentials.usernames]` を確認してください。")
+        st.stop()
+        
+    raw_creds = auth_secrets["credentials"]["usernames"]
+    credentials = {"usernames": {}}
+    
     for uname, info in raw_creds.items():
-        credentials['usernames'][uname] = {
-            'name': info['name'],
-            'password': info['password']
+        credentials["usernames"][uname] = {
+            "name": info["name"],
+            "password": info["password"]
         }
-except KeyError:
-    st.error('Secretsの設定（.streamlit/secrets.toml）が正しくありません。')
-    st.stop()
 
-# Authenticate の初期化
-authenticator = stauth.Authenticate(
-    credentials,
-    st.secrets['auth']['cookie']['name'],
-    st.secrets['auth']['cookie']['key'],
-    st.secrets['auth']['cookie']['expiry_days']
-)
+    # クッキー設定の取得
+    if "cookie" not in auth_secrets:
+        st.error("🍪 **クッキー設定が見つかりません**: `secrets.toml` の `[auth.cookie]` を確認してください。")
+        st.stop()
+        
+    cookie_config = auth_secrets["cookie"]
+    
+    # Authenticate の初期化
+    authenticator = stauth.Authenticate(
+        credentials,
+        cookie_config.get("name", "manerepo_auth"),
+        cookie_config.get("key", "secret_key"),
+        cookie_config.get("expiry_days", 30)
+    )
+
+except Exception as e:
+    st.error(f"🚀 **起動エラー**: Secretsの設定に問題があります。詳細: {e}")
+    st.stop()
 
 # ログイン画面の表示
 authenticator.login(location='main')
