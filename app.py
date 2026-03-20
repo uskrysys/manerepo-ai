@@ -284,20 +284,25 @@ align-items: center;
 
 /* 自作グリッド設定 */
 .mobile-cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; width: 100%; }
-/* ポップオーバーボタン自体の見た目をカレンダー風に上書き */
-div[data-testid="stPopover"] > button {
-    border: 1px solid #eee !important;
-    padding: 2px !important;
-    height: 55px !important;
-    background-color: transparent !important;
-    font-size: 12px !important;
-}
-/* スマホでも columns(7) を縦に並ばせない設定 */
+/* スマホでも7列横並びを強制 */
 [data-testid="column"] { flex: 1 1 0% !important; min-width: 0px !important; }
+/* ポップオーバーボタンをカレンダーセル風に装飾 */
+div[data-testid="stPopover"] > button {
+    border: 1px solid #f0f0f5 !important;
+    padding: 4px !important;
+    min-height: 50px !important;
+    background-color: #ffffff !important;
+    border-radius: 8px !important;
+}
 /* ボタン内の余白を極限まで削る */
 .stButton button { padding: 2px !important; min-height: 45px !important; font-size: 12px !important; }
-/* 金額ラベルの文字を小さくして1行に収める */
-.cal-amount-label { font-size: 9px !important; line-height: 1.1; text-align: center; }
+/* 金額テキストの微調整 */
+.cal-amount-label {
+    font-size: 8px !important;
+    line-height: 1.1;
+    margin-top: 2px;
+    text-align: center;
+}
 
 /* カレンダーセルの塗り分け */
 .cal-table td { padding: 12px 4px; text-align: center; border-radius: 10px; font-size: 14px; position: relative; transition: all 0.2s; }
@@ -2658,212 +2663,124 @@ def main_app_logic(user_id):
 
 
 
-    with tab4:
-        # ================================================================
-        # クイック入力フォーム（カレンダー連動・スマホ最適化）— 最優先表示
-        # ================================================================
-        col_form, col_cal = st.columns([1, 1])
+    with tab_input:
+        st.markdown('<div class="section-header">📅 今月の収支状況</div>', unsafe_allow_html=True)
         
-        with col_form:
-            st.markdown('<div class="section-header">✏️ 取引を記録する</div>', unsafe_allow_html=True)
-    
-            with st.form(key="quick_input_form", clear_on_submit=True):
-                # --- 必須項目（常に表示） ---
-                qi_row1_c1, qi_row1_c2 = st.columns(2)
-                with qi_row1_c1:
-                    # valueにセッションの状態を渡すことで、カレンダーのクリックと同期します
-                    qi_date = st.date_input(
-                        "📅 日付 *", 
-                        value=st.session_state.target_date, 
-                        key="manual_date_input"
-                    )
-                with qi_row1_c2:
-                    qi_type = st.selectbox("🔄 収支タイプ *", ["支出", "収入"], key="form_type_input")
-                    if qi_type == "収入":
-                         st.markdown("<div style='color:#34c759; font-weight:600; font-size:13px; margin-top:-10px; margin-bottom:10px;'>🟢 収入（プラス）として記録されます</div>", unsafe_allow_html=True)
-                         st.markdown("<style>div[data-testid='stForm'] { border-left: 5px solid #00d1b2 !important; box-shadow: 0 4px 12px rgba(0, 209, 178, 0.1); }</style>", unsafe_allow_html=True)
-                    else:
-                         st.markdown("<div style='color:#ff3b30; font-weight:600; font-size:13px; margin-top:-10px; margin-bottom:10px;'>🔴 支出（マイナス）として記録されます</div>", unsafe_allow_html=True)
-                         st.markdown("<style>div[data-testid='stForm'] { border-left: 5px solid #ff4b4b !important; box-shadow: 0 4px 12px rgba(255, 75, 75, 0.1); }</style>", unsafe_allow_html=True)
-    
-                qi_row2_c1, qi_row2_c2 = st.columns(2)
-                with qi_row2_c1:
-                    if qi_type == "支出":
-                        qi_category = st.selectbox("📂 カテゴリー *", EXPENSE_CATEGORIES, key="qi_cat")
-                    else:
-                        qi_category = st.selectbox("📂 カテゴリー *", INCOME_CATEGORIES, key="qi_cat")
-                with qi_row2_c2:
-                    qi_amount = st.number_input("💰 金額 (円) *", min_value=0, step=100, value=0, key="qi_amount")
-    
-                # --- 任意項目（折りたたみ） ---
-                with st.expander("＋ 詳細を追加（メモ・性質タグ）"):
-                    qi_content = st.text_input("📝 メモ・内容", placeholder="例: スーパーで買い物", key="qi_content")
-                    if qi_type == "支出":
-                        qi_nature = st.selectbox("🏷️ 性質タグ", CONSUMPTION_TAGS, key="qi_nature")
-                    else:
-                        qi_nature = "収入"
-                        st.caption("💡 収入の性質タグは自動設定されます")
-    
-                submitted = st.form_submit_button("💾 登録する", use_container_width=True, type="primary")
-                if submitted:
-                    # バリデーション（必須項目チェック）
-                    errors = []
-                    if qi_amount <= 0:
-                        errors.append("⚠️ 金額は1円以上を入力してください。")
-                    if not qi_category or qi_category.strip() == "":
-                        errors.append("⚠️ カテゴリーを選択してください。")
-                    if not qi_date:
-                        errors.append("⚠️ 日付を入力してください。")
-                    
-                    if errors:
-                        for err in errors:
-                            st.error(err)
-                    else:
-                        # 内容が空の場合はカテゴリー名を自動補完
-                        final_content = qi_content.strip() if qi_content and qi_content.strip() else qi_category
-                        new_row = {
-                            "user_id": st.session_state.get("username", user_id),
-                            "日付": qi_date,
-                            "タイプ": qi_type,
-                            "カテゴリー": qi_category,
-                            "内容": final_content,
-                            "金額": int(qi_amount),
-                            "性質": qi_nature
-                        }
-                        try:
-                            st.session_state.df = pd.concat(
-                                [st.session_state.df, pd.DataFrame([new_row])], 
-                                ignore_index=True
-                            )
-                            save_data(st.session_state.df, st.session_state["username"])
-                            # ===== BS側への連動更新 =====
-                            update_bs_from_transactions([new_row], st.session_state["username"])
-    
-                            st.toast(f"✅ {qi_date} の {qi_type}「{final_content}」{qi_amount:,}円 を登録しました！")
-                            # 送信後もカレンダーで選択中の日付を維持（StreamlitAPIException対策）
-                            st.session_state.target_date = qi_date
-                            # 診断・スコアタブ（インデックス 2）へ自動遷移 ※タブ構成変更によりインデックスが変わった想定
-                            st.session_state.switch_to_tab = 2
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"⚠️ データの保存に失敗しました。時間をおいて再度お試しください。\n詳細: {e}")
+        # --- CSS: スマホでも絶対7列を維持する軽量グリッド ---
+        st.markdown("""
+        <style>
+            .simple-cal-container {
+                display: grid;
+                grid-template-columns: repeat(7, 1fr);
+                gap: 4px;
+                width: 100%;
+                margin-bottom: 10px;
+            }
+            .simple-day {
+                aspect-ratio: 1 / 1;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 14px;
+                border-radius: 8px;
+                border: 1px solid #f0f0f5;
+                background-color: #ffffff;
+            }
+            .has-exp { background-color: #fff5f5; border-color: #ffcdd2; color: #d32f2f; }
+            .has-inc { background-color: #f5fff5; border-color: #c8e6c9; color: #388e3c; }
+            .has-both { background-color: #f0f4ff; border-color: #c5cae9; color: #303f9f; }
+            .is-today { font-weight: bold; border: 2px solid #000; }
+            .wd-label { font-size: 10px; color: #888; text-align: center; padding-bottom: 5px; }
+        </style>
+        """, unsafe_allow_html=True)
 
-        st.markdown("<br>", unsafe_allow_html=True)
+        # カレンダー計算用
+        cal = calendar.monthcalendar(st.session_state.view_date.year, st.session_state.view_date.month)
+        spent_days = set(this_month_df[this_month_df["タイプ"] == "支出"]["日付"].apply(lambda x: x.day)) if (isinstance(this_month_df, pd.DataFrame) and not this_month_df.empty) else set()
+        income_days = set(this_month_df[this_month_df["タイプ"] == "収入"]["日付"].apply(lambda x: x.day)) if (isinstance(this_month_df, pd.DataFrame) and not this_month_df.empty) else set()
 
-        with col_cal:
-            # --- 収支カレンダー（クリック連動機能付き） ---
-            st.markdown('<div class="section-header">📆 収支カレンダー <span style="font-size:0.7em; color:#86868b; font-weight:400;">日付をクリックすると↑の入力フォームに連動します</span></div>', unsafe_allow_html=True)
-            st.markdown('<div class="cal-container">', unsafe_allow_html=True)
-            cal = calendar.monthcalendar(st.session_state.view_date.year, st.session_state.view_date.month)
-            spent_days = set(this_month_df[this_month_df["タイプ"] == "支出"]["日付"].apply(lambda x: x.day)) if (isinstance(this_month_df, pd.DataFrame) and not this_month_df.empty) else set()
-            income_days = set(this_month_df[this_month_df["タイプ"] == "収入"]["日付"].apply(lambda x: x.day)) if (isinstance(this_month_df, pd.DataFrame) and not this_month_df.empty) else set()
-            weekdays = ["月", "火", "水", "木", "金", "土", "日"]
-    
-            # 曜日ヘッダー
-            wd_cols = st.columns(7)
-            for i, wd in enumerate(weekdays):
-                wd_color = "#ff3b30" if i == 6 else ("#0071e3" if i == 5 else "#86868b")
-                wd_cols[i].markdown(f'<div style="text-align:center; font-size:12px; font-weight:600; color:{wd_color}; padding:4px 0;">{wd}</div>', unsafe_allow_html=True)
-    
-            # 日ごとの金額集計（カレンダー表示用）
-            day_expense_map = {}
-            day_income_map = {}
-            if isinstance(this_month_df, pd.DataFrame) and not this_month_df.empty:
-                for _, row in this_month_df.iterrows():
-                    d = row["日付"].day if hasattr(row["日付"], 'day') else row["日付"]
-                    amt = row["金額"] if pd.notna(row["金額"]) else 0
-                    if row["タイプ"] == "支出":
-                        day_expense_map[d] = day_expense_map.get(d, 0) + amt
-                    elif row["タイプ"] == "収入":
-                        day_income_map[d] = day_income_map.get(d, 0) + amt
-    
-            # カレンダー本体（ボタン式・色分け付き）
-            for week in cal:
-                week_cols = st.columns(7)
-                for i, day in enumerate(week):
-                    with week_cols[i]:
-                        if day == 0:
-                            st.write("")
-                        else:
-                            has_spent = day in spent_days
-                            has_income = day in income_days
-                            is_today = (day == datetime.date.today().day and 
-                                       st.session_state.view_date.month == datetime.date.today().month and 
-                                       st.session_state.view_date.year == datetime.date.today().year)
-                            is_selected = (hasattr(st.session_state, 'selected_date') and
-                                          st.session_state.selected_date.day == day and
-                                          st.session_state.selected_date.month == st.session_state.view_date.month and
-                                          st.session_state.selected_date.year == st.session_state.view_date.year)
-    
-                            # CSSクラスの決定
-                            css_classes = []
-                            if has_spent and has_income:
-                                css_classes.append("cal-day-both")
-                            elif has_spent:
-                                css_classes.append("cal-day-expense")
-                            elif has_income:
-                                css_classes.append("cal-day-income")
-                            if is_today:
-                                css_classes.append("cal-day-today")
-                            if is_selected:
-                                css_classes.append("cal-day-selected")
-    
-                            # 色付きコンテナで囲む
-                            if css_classes:
-                                st.markdown(f'<div class="{" ".join(css_classes)}">', unsafe_allow_html=True)
-    
-                            # ポップアップ形式でその場入力
-                            u_key = f"{st.session_state.view_date.year}_{st.session_state.view_date.month}_{day}"
-                            with st.popover(f"{day}", use_container_width=True):
-                                st.markdown(f"#### {st.session_state.view_date.month}/{day} の記録")
-                                p_type = st.radio("タイプ", ["支出", "収入"], horizontal=True, key=f"p2_type_{u_key}")
-                                p_cat = st.selectbox("カテゴリー", st.session_state.expense_categories if p_type=="支出" else INCOME_CATEGORIES, key=f"p2_cat_{u_key}")
-                                p_amt = st.number_input("金額 (円)", min_value=0, step=100, key=f"p2_amt_{u_key}")
-                                p_memo = st.text_input("内容", placeholder="ランチ、光熱費など", key=f"p2_memo_{u_key}")
-                                
-                                if st.button("この日で登録", key=f"p2_save_{u_key}", type="primary", use_container_width=True):
+        # 曜日ヘッダー
+        wd_html = '<div class="simple-cal-container">' + "".join([f'<div class="wd-label">{d}</div>' for d in ["月","火","水","木","金","土","日"]]) + '</div>'
+        st.markdown(wd_html, unsafe_allow_html=True)
+
+        # カレンダーグリッドの生成（表示専用）
+        cal_html = '<div class="simple-cal-container">'
+        for week in cal:
+            for day in week:
+                if day == 0:
+                    cal_html += '<div style="border:none;"></div>'
+                else:
+                    h_exp = day in spent_days
+                    h_inc = day in income_days
+                    status_class = "has-both" if h_exp and h_inc else ("has-exp" if h_exp else ("has-inc" if h_inc else ""))
+                    today_class = "is-today" if day == datetime.date.today().day and st.session_state.view_date.month == datetime.date.today().month else ""
+                    cal_html += f'<div class="simple-day {status_class} {today_class}">{day}</div>'
+        cal_html += '</div>'
+        st.markdown(cal_html, unsafe_allow_html=True)
+        
+        st.markdown("---")
+
+        st.markdown('<div class="section-header">🖱️ 操作用カレンダー <span style="font-size:0.7em; color:#86868b; font-weight:400;">日付をタップして詳細を入力</span></div>', unsafe_allow_html=True)
+        # 曜日ヘッダー
+        wd_cols = st.columns(7)
+        weekdays = ["月", "火", "水", "木", "金", "土", "日"]
+        for i, wd in enumerate(weekdays):
+            wd_color = "#ff3b30" if i == 6 else ("#0071e3" if i == 5 else "#86868b")
+            wd_cols[i].markdown(f'<div style="text-align:center; font-size:12px; font-weight:600; color:{wd_color}; padding:4px 0;">{wd}</div>', unsafe_allow_html=True)
+
+        # カレンダー本体（ボタン式・詳細入力ポップアップ付き）
+        for week in cal:
+            week_cols = st.columns(7)
+            for i, day in enumerate(week):
+                with week_cols[i]:
+                    if day == 0:
+                        st.write("")
+                    else:
+                        # ポップアップ内への項目移植
+                        with st.popover(f"{day}", use_container_width=True):
+                            st.markdown(f"### 📝 {st.session_state.view_date.month}/{day} の記録")
+                            
+                            # 削除したフォームから移植した項目
+                            p_type = st.radio("タイプ", ["支出", "収入"], horizontal=True, key=f"p_type_{day}")
+                            
+                            col_p1, col_p2 = st.columns(2)
+                            with col_p1:
+                                p_cat = st.selectbox("カテゴリー", EXPENSE_CATEGORIES if p_type=="支出" else INCOME_CATEGORIES, key=f"p_cat_{day}")
+                            with col_p2:
+                                p_tag = st.selectbox("性質", ["消費 (Need)", "投資 (Investment)", "浪費 (Want)"] if p_type=="支出" else ["収入"], key=f"p_tag_{day}")
+                            
+                            p_amt = st.number_input("金額 (円)", min_value=0, step=100, key=f"p_amt_{day}")
+                            p_memo = st.text_input("内容・メモ", placeholder="例: ランチ、電気代", key=f"p_memo_{day}")
+
+                            if st.button("この内容で登録", key=f"p_btn_{day}", type="primary", use_container_width=True):
+                                try:
                                     new_entry = {
                                         "user_id": st.session_state["username"],
                                         "日付": datetime.date(st.session_state.view_date.year, st.session_state.view_date.month, day),
                                         "タイプ": p_type,
                                         "カテゴリー": p_cat,
-                                        "性質": "消費" if p_type == "支出" else "収入",
+                                        "性質": p_tag,
                                         "金額": p_amt,
                                         "内容": p_memo if p_memo else "（未入力）"
                                     }
+                                    
+                                    # 保存と反映の処理
                                     st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame([new_entry])], ignore_index=True)
                                     save_data(st.session_state.df, st.session_state["username"])
                                     update_bs_from_transactions([new_entry], st.session_state["username"])
-                                    st.success("登録しました！")
-                                    st.rerun()
+                                    
+                                    st.success("保存完了！")
+                                    st.rerun() # ← これで上部の「表示専用カレンダー」の色も即座に変わります
+                                except Exception as e:
+                                    st.error(f"❌ 保存に失敗しました: {e}")
 
-                            # 金額サマリーを「k」単位で短く表示（スマホ対策）
-                            day_exp = day_expense_map.get(day, 0)
-                            day_inc = day_income_map.get(day, 0)
-                            
-                            if day_exp > 0 or day_inc > 0:
-                                exp_text = f"-{day_exp/1000:.1f}k" if day_exp >= 1000 else f"-{day_exp}"
-                                inc_text = f"+{day_inc/1000:.1f}k" if day_inc >= 1000 else f"+{day_inc}"
-                                
-                                if day_exp > 0 and day_inc > 0:
-                                    st.markdown(f'<div class="cal-amount-label"><span style="color:#00897b;">{inc_text}</span><br><span style="color:#e53935;">{exp_text}</span></div>', unsafe_allow_html=True)
-                                elif day_exp > 0:
-                                    st.markdown(f'<div class="cal-amount-label" style="color:#e53935;">{exp_text}</div>', unsafe_allow_html=True)
-                                elif day_inc > 0:
-                                    st.markdown(f'<div class="cal-amount-label" style="color:#00897b;">{inc_text}</div>', unsafe_allow_html=True)
-    
-                            if css_classes:
-                                st.markdown('</div>', unsafe_allow_html=True)
-
-            st.markdown('''
-            <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center; font-size:12px; color:#86868b; margin-top:4px;">
-                <span><span style="display:inline-block; width:14px; height:14px; background:rgba(255,99,132,0.35); border-radius:4px; vertical-align:middle; margin-right:3px;"></span> 支出あり</span>
-                <span><span style="display:inline-block; width:14px; height:14px; background:rgba(75,192,192,0.35); border-radius:4px; vertical-align:middle; margin-right:3px;"></span> 収入あり</span>
-                <span><span style="display:inline-block; width:14px; height:14px; background:linear-gradient(135deg, rgba(75,192,192,0.4) 50%, rgba(255,99,132,0.4) 50%); border-radius:4px; vertical-align:middle; margin-right:3px;"></span> 両方あり</span>
-                <span>👆 日付タップでサクッと記録！</span>
-            </div>
-            ''', unsafe_allow_html=True)
-            st.markdown("<br>", unsafe_allow_html=True)
+        # 注釈
+        st.markdown('''
+        <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center; font-size:12px; color:#86868b; margin-top:4px;">
+            <span>👆 日付タップで詳細を入力して登録できます</span>
+        </div>
+        ''', unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
 
     with tab_settings:
         st.header("⚙️ アプリケーション設定")
