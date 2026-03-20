@@ -266,6 +266,46 @@ font-weight: 600;
 }
 .cal-today { border: 2px solid #0071e3 !important; }
 
+/* === カレンダーボタン式の色分け === */
+.cal-day-expense .stButton > button {
+  background: rgba(255, 99, 132, 0.35) !important;
+  color: #c62828 !important;
+  border: 1px solid rgba(255, 99, 132, 0.5) !important;
+  font-weight: 700 !important;
+}
+.cal-day-expense .stButton > button:hover {
+  background: rgba(255, 99, 132, 0.55) !important;
+}
+.cal-day-income .stButton > button {
+  background: rgba(75, 192, 192, 0.35) !important;
+  color: #00695c !important;
+  border: 1px solid rgba(75, 192, 192, 0.5) !important;
+  font-weight: 700 !important;
+}
+.cal-day-income .stButton > button:hover {
+  background: rgba(75, 192, 192, 0.55) !important;
+}
+.cal-day-both .stButton > button {
+  background: linear-gradient(135deg, rgba(75, 192, 192, 0.4) 50%, rgba(255, 99, 132, 0.4) 50%) !important;
+  color: #1a237e !important;
+  border: 1px solid rgba(100, 140, 180, 0.5) !important;
+  font-weight: 700 !important;
+}
+.cal-day-both .stButton > button:hover {
+  background: linear-gradient(135deg, rgba(75, 192, 192, 0.6) 50%, rgba(255, 99, 132, 0.6) 50%) !important;
+}
+.cal-day-today .stButton > button {
+  box-shadow: inset 0 0 0 2px #0071e3 !important;
+}
+.cal-day-selected .stButton > button {
+  box-shadow: inset 0 0 0 2.5px #ff9500 !important;
+}
+/* カレンダー金額サマリーテキスト */
+.cal-amount-label {
+  text-align: center; font-size: 9px; margin-top: -6px; line-height: 1.2;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
 /* プログレスバー */
 .progress-outer { background: #e5e5ea; border-radius: 12px; height: 16px; overflow: hidden; margin: 12px 0; }
 .progress-inner { height: 100%; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 10px; color: white; }
@@ -277,6 +317,42 @@ font-weight: 600;
 .cal-table th, .cal-table td { font-size: 12px; padding: 10px 4px; }
 .budget-table, .tx-table { display: block; overflow-x: auto; white-space: nowrap; }
 .section-header { font-size: 18px; margin: 24px 0 12px 0; }
+
+/* --- カレンダー（st.columns(7)）のスマホ横並び維持 --- */
+/* Streamlit の st.columns は [data-testid="stHorizontalBlock"] でラップされる */
+[data-testid="stHorizontalBlock"] {
+    flex-wrap: nowrap !important;
+    gap: 2px !important;
+}
+/* カレンダー内ボタンのスマホ最適化 */
+[data-testid="stHorizontalBlock"] .stButton > button {
+    padding: 0.3rem 0.1rem !important;
+    font-size: 12px !important;
+    min-height: 36px !important;
+    min-width: unset !important;
+    border-radius: 8px !important;
+}
+/* カレンダーの各カラム幅を均等に */
+[data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+    min-width: 0 !important;
+    flex: 1 1 0% !important;
+}
+/* フォーム内の入力欄もスマホ向けに調整 */
+.stForm [data-testid="stHorizontalBlock"] {
+    flex-wrap: wrap !important;
+    gap: 4px !important;
+}
+}
+
+/* ===== 超小画面 (375px以下) ===== */
+@media (max-width: 375px) {
+[data-testid="stHorizontalBlock"] .stButton > button {
+    padding: 0.2rem 0 !important;
+    font-size: 11px !important;
+    min-height: 32px !important;
+}
+.section-header { font-size: 16px; margin: 16px 0 8px 0; }
+.metric-card .value { font-size: 22px; }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -694,6 +770,40 @@ def main_app_logic(user_id):
             load_assets_data.clear()
         except Exception as e:
             st.error(f"Supabase(BS)保存エラー: {e}")
+
+    def update_bs_from_transactions(new_tx_list, user_id):
+        """
+        新規取引(PL)データリストに基づいて、BS(流動資産)の代表口座の残高を自動更新する。
+        new_tx_list: [{'タイプ': '支出', '金額': 1000}, ...] 形式のリスト
+        """
+        if not new_tx_list: return
+        df_assets = st.session_state.get("assets_df", pd.DataFrame())
+        if df_assets.empty: return
+
+        # 代表口座（現金・預金の最初の行）をターゲットにする
+        target_indices = df_assets[df_assets["区分"] == "流動資産 (現金・預金)"].index
+        if len(target_indices) == 0: return
+        
+        target_idx = target_indices[0]
+        net_change = 0
+        
+        for tx in new_tx_list:
+            try:
+                amt = int(tx.get("金額", 0))
+                # 空文字などの例外を回避
+            except (ValueError, TypeError):
+                amt = 0
+                
+            if tx.get("タイプ") == "収入":
+                net_change += amt
+            elif tx.get("タイプ") == "支出":
+                net_change -= amt
+                
+        if net_change != 0:
+            df_assets.at[target_idx, "金額"] += net_change
+            st.session_state.assets_df = df_assets
+            save_assets_data(df_assets, user_id)
+            st.toast(f"🔄 BSの口座残高も連動して更新されました ({net_change:+,}円)")
     
     # グローバルでの呼び出しを削除し、main() 内で行うように変更
     
@@ -2489,70 +2599,8 @@ def main_app_logic(user_id):
 
 
     with tab4:
-        # --- 収支カレンダー（クリック連動機能付き） ---
-        st.markdown('<div class="section-header">📆 収支カレンダー <span style="font-size:0.7em; color:#86868b; font-weight:400;">日付をクリックすると↓の入力フォームに連動します</span></div>', unsafe_allow_html=True)
-        cal = calendar.monthcalendar(st.session_state.view_date.year, st.session_state.view_date.month)
-        spent_days = set(this_month_df[this_month_df["タイプ"] == "支出"]["日付"].apply(lambda x: x.day)) if (isinstance(this_month_df, pd.DataFrame) and not this_month_df.empty) else set()
-        income_days = set(this_month_df[this_month_df["タイプ"] == "収入"]["日付"].apply(lambda x: x.day)) if (isinstance(this_month_df, pd.DataFrame) and not this_month_df.empty) else set()
-        weekdays = ["月", "火", "水", "木", "金", "土", "日"]
-
-        # 曜日ヘッダー
-        wd_cols = st.columns(7)
-        for i, wd in enumerate(weekdays):
-            wd_color = "#ff3b30" if i == 6 else ("#0071e3" if i == 5 else "#86868b")
-            wd_cols[i].markdown(f'<div style="text-align:center; font-size:12px; font-weight:600; color:{wd_color}; padding:4px 0;">{wd}</div>', unsafe_allow_html=True)
-
-        # カレンダー本体（ボタン式）
-        for week in cal:
-            week_cols = st.columns(7)
-            for i, day in enumerate(week):
-                with week_cols[i]:
-                    if day == 0:
-                        st.write("")
-                    else:
-                        has_spent = day in spent_days
-                        has_income = day in income_days
-                        is_today = (day == datetime.date.today().day and 
-                                   st.session_state.view_date.month == datetime.date.today().month and 
-                                   st.session_state.view_date.year == datetime.date.today().year)
-                        is_selected = (hasattr(st.session_state, 'selected_date') and
-                                      st.session_state.selected_date.day == day and
-                                      st.session_state.selected_date.month == st.session_state.view_date.month and
-                                      st.session_state.selected_date.year == st.session_state.view_date.year)
-
-                        # 表示用のアイコンと色
-                        if has_spent and has_income:
-                            indicator = "🔵"
-                        elif has_spent:
-                            indicator = "🔴"
-                        elif has_income:
-                            indicator = "🟢"
-                        else:
-                            indicator = ""
-
-                        if st.button(
-                            f"{day}", 
-                            key=f"cal_day_{st.session_state.view_date.year}_{st.session_state.view_date.month}_{day}_tab4",
-                            use_container_width=True,
-                            help=f"{st.session_state.view_date.year}/{st.session_state.view_date.month}/{day} の取引を入力"
-                        ):
-                            clicked_date = datetime.date(
-                                st.session_state.view_date.year,
-                                st.session_state.view_date.month,
-                                day
-                            )
-                            st.session_state.selected_date = clicked_date
-                            st.session_state.qi_date_input = clicked_date
-                            st.rerun()
-                        # 日付セルの下にインジケーター表示
-                        if indicator:
-                            st.markdown(f'<div style="text-align:center; font-size:10px; margin-top:-8px;">{indicator}</div>', unsafe_allow_html=True)
-
-        st.caption("🔴 支出あり　🟢 収入あり　🔵 両方あり　｜　👆 日付をクリックしてサクッと記録！")
-        st.markdown("<br>", unsafe_allow_html=True)
-
         # ================================================================
-        # クイック入力フォーム（カレンダー連動・スマホ最適化）
+        # クイック入力フォーム（カレンダー連動・スマホ最適化）— 最優先表示
         # ================================================================
         st.markdown('<div class="section-header">✏️ 取引を記録する</div>', unsafe_allow_html=True)
 
@@ -2621,6 +2669,9 @@ def main_app_logic(user_id):
                             ignore_index=True
                         )
                         save_data(st.session_state.df, st.session_state["username"])
+                        # ===== BS側への連動更新 =====
+                        update_bs_from_transactions([new_row], st.session_state["username"])
+
                         st.toast(f"✅ {qi_date} の {qi_type}「{final_content}」{qi_amount:,}円 を登録しました！")
                         # 送信後もカレンダーで選択中の日付を維持（clear_on_submit対策）
                         st.session_state.qi_date_input = st.session_state.selected_date
@@ -2630,6 +2681,104 @@ def main_app_logic(user_id):
                     except Exception as e:
                         st.error(f"⚠️ データの保存に失敗しました。時間をおいて再度お試しください。\n詳細: {e}")
 
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # --- 収支カレンダー（クリック連動機能付き） ---
+        st.markdown('<div class="section-header">📆 収支カレンダー <span style="font-size:0.7em; color:#86868b; font-weight:400;">日付をクリックすると↑の入力フォームに連動します</span></div>', unsafe_allow_html=True)
+        cal = calendar.monthcalendar(st.session_state.view_date.year, st.session_state.view_date.month)
+        spent_days = set(this_month_df[this_month_df["タイプ"] == "支出"]["日付"].apply(lambda x: x.day)) if (isinstance(this_month_df, pd.DataFrame) and not this_month_df.empty) else set()
+        income_days = set(this_month_df[this_month_df["タイプ"] == "収入"]["日付"].apply(lambda x: x.day)) if (isinstance(this_month_df, pd.DataFrame) and not this_month_df.empty) else set()
+        weekdays = ["月", "火", "水", "木", "金", "土", "日"]
+
+        # 曜日ヘッダー
+        wd_cols = st.columns(7)
+        for i, wd in enumerate(weekdays):
+            wd_color = "#ff3b30" if i == 6 else ("#0071e3" if i == 5 else "#86868b")
+            wd_cols[i].markdown(f'<div style="text-align:center; font-size:12px; font-weight:600; color:{wd_color}; padding:4px 0;">{wd}</div>', unsafe_allow_html=True)
+
+        # 日ごとの金額集計（カレンダー表示用）
+        day_expense_map = {}
+        day_income_map = {}
+        if isinstance(this_month_df, pd.DataFrame) and not this_month_df.empty:
+            for _, row in this_month_df.iterrows():
+                d = row["日付"].day if hasattr(row["日付"], 'day') else row["日付"]
+                amt = row["金額"] if pd.notna(row["金額"]) else 0
+                if row["タイプ"] == "支出":
+                    day_expense_map[d] = day_expense_map.get(d, 0) + amt
+                elif row["タイプ"] == "収入":
+                    day_income_map[d] = day_income_map.get(d, 0) + amt
+
+        # カレンダー本体（ボタン式・色分け付き）
+        for week in cal:
+            week_cols = st.columns(7)
+            for i, day in enumerate(week):
+                with week_cols[i]:
+                    if day == 0:
+                        st.write("")
+                    else:
+                        has_spent = day in spent_days
+                        has_income = day in income_days
+                        is_today = (day == datetime.date.today().day and 
+                                   st.session_state.view_date.month == datetime.date.today().month and 
+                                   st.session_state.view_date.year == datetime.date.today().year)
+                        is_selected = (hasattr(st.session_state, 'selected_date') and
+                                      st.session_state.selected_date.day == day and
+                                      st.session_state.selected_date.month == st.session_state.view_date.month and
+                                      st.session_state.selected_date.year == st.session_state.view_date.year)
+
+                        # CSSクラスの決定
+                        css_classes = []
+                        if has_spent and has_income:
+                            css_classes.append("cal-day-both")
+                        elif has_spent:
+                            css_classes.append("cal-day-expense")
+                        elif has_income:
+                            css_classes.append("cal-day-income")
+                        if is_today:
+                            css_classes.append("cal-day-today")
+                        if is_selected:
+                            css_classes.append("cal-day-selected")
+
+                        # 色付きコンテナで囲む
+                        if css_classes:
+                            st.markdown(f'<div class="{" ".join(css_classes)}">', unsafe_allow_html=True)
+
+                        if st.button(
+                            f"{day}", 
+                            key=f"cal_day_{st.session_state.view_date.year}_{st.session_state.view_date.month}_{day}_tab4",
+                            use_container_width=True,
+                            help=f"{st.session_state.view_date.year}/{st.session_state.view_date.month}/{day} の取引を入力"
+                        ):
+                            clicked_date = datetime.date(
+                                st.session_state.view_date.year,
+                                st.session_state.view_date.month,
+                                day
+                            )
+                            st.session_state.selected_date = clicked_date
+                            st.session_state.qi_date_input = clicked_date
+                            st.rerun()
+
+                        # 日付セルの下に金額サマリー表示
+                        day_exp = day_expense_map.get(day, 0)
+                        day_inc = day_income_map.get(day, 0)
+                        if day_exp > 0 and day_inc > 0:
+                            st.markdown(f'<div class="cal-amount-label"><span style="color:#00897b;">+{day_inc:,.0f}</span><br><span style="color:#e53935;">-{day_exp:,.0f}</span></div>', unsafe_allow_html=True)
+                        elif day_exp > 0:
+                            st.markdown(f'<div class="cal-amount-label" style="color:#e53935;">-{day_exp:,.0f}</div>', unsafe_allow_html=True)
+                        elif day_inc > 0:
+                            st.markdown(f'<div class="cal-amount-label" style="color:#00897b;">+{day_inc:,.0f}</div>', unsafe_allow_html=True)
+
+                        if css_classes:
+                            st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('''
+        <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center; font-size:12px; color:#86868b; margin-top:4px;">
+            <span><span style="display:inline-block; width:14px; height:14px; background:rgba(255,99,132,0.35); border-radius:4px; vertical-align:middle; margin-right:3px;"></span> 支出あり</span>
+            <span><span style="display:inline-block; width:14px; height:14px; background:rgba(75,192,192,0.35); border-radius:4px; vertical-align:middle; margin-right:3px;"></span> 収入あり</span>
+            <span><span style="display:inline-block; width:14px; height:14px; background:linear-gradient(135deg, rgba(75,192,192,0.4) 50%, rgba(255,99,132,0.4) 50%); border-radius:4px; vertical-align:middle; margin-right:3px;"></span> 両方あり</span>
+            <span>👆 日付タップでサクッと記録！</span>
+        </div>
+        ''', unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
 
         # --- 固定費一括登録セクション（編集可能） ---
@@ -2666,6 +2815,9 @@ def main_app_logic(user_id):
                     if added_rows:
                         st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(added_rows)], ignore_index=True)
                         save_data(st.session_state.df, st.session_state["username"])
+                        # ===== BS側への連動更新 =====
+                        update_bs_from_transactions(added_rows, st.session_state["username"])
+                        
                         st.success(f"✅ {len(added_rows)} 件登録完了！")
                     else:
                         st.info("💡 全ての固定費が登録済みです。")
@@ -2681,6 +2833,9 @@ def main_app_logic(user_id):
                     if added_rows:
                         st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(added_rows)], ignore_index=True)
                         save_data(st.session_state.df, st.session_state["username"])
+                        # ===== BS側への連動更新 =====
+                        update_bs_from_transactions(added_rows, st.session_state["username"])
+                        
                         st.success(f"✅ {len(added_rows)} 件をコピーしました！")
                     if skipped_items:
                         st.info(f"💡 {len(skipped_items)} 件は既に今月に存在するためスキップしました。")
@@ -2711,6 +2866,7 @@ def main_app_logic(user_id):
         st.markdown('<div class="section-header">💾 データ編集・管理</div>', unsafe_allow_html=True)
         st.info("✨ **編集のヒント**: 表の**最下部にある空行**をクリックすると、新しいデータを直接追加できます。")
         st.caption("テーブルを編集すると画面上のサマリーやグラフに即座に反映されます。編集内容は自動的に保存されます。")
+        st.warning("⚠️ **【重要】過去データの編集・削除時における注意点**\n\nここでの編集や削除は、**銀行口座などの資産残高（BS）には自動連動しません**。過去データの金額を変更した場合は、「🏦 純資産(BS)」タブから手動で現在の口座残高を調整してください。")
 
         # 選択列を追加して一括削除用チェックボックスを作成
         display_df = st.session_state.df.copy()
@@ -2844,6 +3000,11 @@ def main_app_logic(user_id):
                     if st.button("📥 修正内容で確定インポート", use_container_width=True, type="primary"):
                         st.session_state.df = pd.concat([st.session_state.df, edited_import_df], ignore_index=True)
                         save_data(st.session_state.df, st.session_state["username"])
+                        
+                        # ===== BS側への連動更新 =====
+                        import_records = edited_import_df.to_dict("records")
+                        update_bs_from_transactions(import_records, st.session_state["username"])
+                        
                         st.success(f"✅ {len(edited_import_df)} 件のデータを正式に登録しました！")
                         del st.session_state.import_preview_df
                         st.rerun()
