@@ -363,49 +363,59 @@ font-weight: 600;
 .progress-outer { background: #e5e5ea; border-radius: 12px; height: 16px; overflow: hidden; margin: 12px 0; }
 .progress-inner { height: 100%; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 10px; color: white; }
 
-/* ===== スマホ対応 ===== */
+/* ===== レスポンシブ対応（スマホ最適化） ===== */
 @media (max-width: 768px) {
-.metric-card { padding: 20px; }
-.metric-card .value { font-size: 26px; }
-.cal-table th, .cal-table td { font-size: 12px; padding: 10px 4px; }
-.budget-table, .tx-table { display: block; overflow-x: auto; white-space: nowrap; }
-.section-header { font-size: 18px; margin: 24px 0 12px 0; }
+    /* 1. 【最優先】横並びブロックの縦積み (7カラムのカレンダー以外を対象) */
+    [data-testid="stHorizontalBlock"]:not(:has(> [data-testid="column"]:nth-child(7))) {
+        flex-direction: column !important;
+        gap: 1rem !important;
+    }
+    [data-testid="stHorizontalBlock"]:not(:has(> [data-testid="column"]:nth-child(7))) > [data-testid="column"] {
+        width: 100% !important;
+        min-width: 100% !important;
+        flex: 1 1 100% !important;
+    }
 
-/* --- カレンダー（st.columns(7)）のスマホ横並び維持 --- */
-/* カレンダー部分をラップする.cal-container内のみに限定し、フォームなどは改行させる */
-.cal-container [data-testid="stHorizontalBlock"] {
-    flex-wrap: nowrap !important;
-    gap: 2px !important;
-}
-/* カレンダー内ボタンのスマホ最適化 */
-.cal-container [data-testid="stHorizontalBlock"] .stButton > button {
-    padding: 8px 2px !important;
-    font-size: 0.9rem !important;
-    min-height: 36px !important;
-    min-width: unset !important;
-    border-radius: 8px !important;
-}
-/* カレンダーの各カラム幅を均等に */
-.cal-container [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
-    min-width: 0 !important;
-    flex: 1 1 0% !important;
-}
-/* フォーム内の入力欄もスマホ向けに調整 */
-.stForm [data-testid="stHorizontalBlock"] {
-    flex-wrap: wrap !important;
-    gap: 4px !important;
-}
+    /* 2. 指標カード (Metric Card) の視認性向上 */
+    .metric-card {
+        padding: 20px !important;
+        margin-bottom: 12px !important;
+        background-color: #ffffff !important;
+        border: 1px solid #e5e5ea !important;
+        border-radius: 16px !important;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.03) !important;
+        text-align: left !important;
+    }
+    .metric-card .value { font-size: 28px !important; }
+    .metric-card .label { font-size: 13px !important; }
+
+    /* 3. プログレスバー・ボタン等の微調整 */
+    .stTabs [data-baseweb="tab"] {
+        padding: 10px 8px !important;
+        font-size: 13px !important;
+    }
+    h1 { font-size: 22px !important; }
+    h2 { font-size: 18px !important; }
+    h3 { font-size: 16px !important; }
+    
+    /* 4. カレンダー（7列）だけは横並びを死守する設定の補強 */
+    [data-testid="stHorizontalBlock"]:has(> [data-testid="column"]:nth-child(7)) {
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        width: 100% !important;
+        gap: 0px !important;
+    }
+    [data-testid="stHorizontalBlock"]:has(> [data-testid="column"]:nth-child(7)) > [data-testid="column"] {
+        width: 14.28% !important;
+        min-width: 0 !important;
+        flex: 1 1 14.28% !important;
+    }
 }
 
-/* ===== 超小画面 (375px以下) ===== */
+/* 超小画面向け (375px以下) */
 @media (max-width: 375px) {
-[data-testid="stHorizontalBlock"] .stButton > button {
-    padding: 0.2rem 0 !important;
-    font-size: 11px !important;
-    min-height: 32px !important;
-}
-.section-header { font-size: 16px; margin: 16px 0 8px 0; }
-.metric-card .value { font-size: 22px; }
+    .metric-card .value { font-size: 24px !important; }
+    div.stButton > button { font-size: 12px !important; }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -2347,10 +2357,10 @@ def main_app_logic(user_id):
             if income > 0:
                 in_cats = this_month_df[this_month_df["タイプ"] == "収入"].groupby("カテゴリー")["金額"].sum()
                 out_cats = this_month_df[this_month_df["タイプ"] == "支出"].groupby("カテゴリー")["金額"].sum()
-                labels = list(in_cats.index) + [f"総{label_inc}"] + list(out_cats.index)
+                labels = list(in_cats.index) + ["総収入"] + list(out_cats.index)
                 if balance > 0: labels.append("残額（貯蓄・繰越）")
-                elif balance < 0: labels.append(f"赤字補填 ({label_exp}超過)")
-
+                elif balance < 0: labels.append("赤字補填（取り崩し）")
+                
                 # 定番カテゴリのカラーマップ定義
                 cd_map = {
                     "食費": "rgba(255, 112, 67, 0.7)",   # オレンジ系
@@ -2360,19 +2370,19 @@ def main_app_logic(user_id):
                     "投資": "rgba(77, 182, 172, 0.7)",     # ターコイズ系
                     "娯楽": "rgba(240, 98, 146, 0.7)",    # ピンク系
                 }
-
+                
                 src, tgt, vals, node_colors, link_colors = [], [], [], [], []
                 center_idx = len(in_cats)
-
+                
                 for i, cat in enumerate(in_cats.index):
                     src.append(i); tgt.append(center_idx); vals.append(in_cats[cat]); link_colors.append("rgba(67, 160, 71, 0.4)")
                     node_colors.append("rgba(67, 160, 71, 0.8)") # 収入ノード色
-
+                
                 node_colors.append("rgba(33, 33, 33, 0.7)") # 中央「総収入」ノード色
-
+                
                 if balance < 0:
                     src.append(len(labels)-1); tgt.append(center_idx); vals.append(abs(balance)); link_colors.append("rgba(229, 57, 53, 0.4)")
-
+                    
                 for i, cat in enumerate(out_cats.index):
                     src.append(center_idx); tgt.append(center_idx + 1 + i); vals.append(out_cats[cat])
                     color = cd_map.get(cat, "rgba(255, 152, 0, 0.5)")
@@ -2664,123 +2674,224 @@ def main_app_logic(user_id):
 
 
     with tab_input:
-        st.markdown('<div class="section-header">📅 今月の収支状況</div>', unsafe_allow_html=True)
+        # --- 1. データ集計とエラー回避 (KeyError防止) ---
+        v_date = st.session_state.view_date
+        selected_date = st.session_state.selected_date
+        spent_days = set()
+        income_days = set()
         
-        # --- CSS: スマホでも絶対7列を維持する軽量グリッド ---
+        # データの安全な抽出
+        if not st.session_state.df.empty and "日付" in st.session_state.df.columns:
+            # 日付列を確実にdatetime64型に変換（AttributeError/KeyError対策）
+            df_snapshot = st.session_state.df.copy()
+            df_snapshot["日付"] = pd.to_datetime(df_snapshot["日付"])
+            
+            # 当月のデータを抽出
+            month_mask = (df_snapshot["日付"].dt.year == v_date.year) & (df_snapshot["日付"].dt.month == v_date.month)
+            month_df = df_snapshot[month_mask]
+            
+            # 収支があった日をセット化して高速判定
+            spent_days = set(month_df[month_df["タイプ"] == "支出"]["日付"].dt.day)
+            income_days = set(month_df[month_df["タイプ"] == "収入"]["日付"].dt.day)
+            
+            # 選択中の日の詳細リスト用データ
+            detail_data = month_df[month_df["日付"].dt.date == selected_date]
+        else:
+            detail_data = pd.DataFrame()
+
+        # --- 2. 【最優先】レスポンシブ・横7列強制CSS ---
         st.markdown("""
         <style>
-            .simple-cal-container {
-                display: grid;
-                grid-template-columns: repeat(7, 1fr);
-                gap: 4px;
-                width: 100%;
-                margin-bottom: 10px;
+            /* 1. 【最優先】カレンダーを画面いっぱいに広げる（コンテナ制限解除） */
+            [data-testid="stAppViewBlockContainer"] {
+                max-width: 100% !important;
+                padding-left: 1rem !important;
+                padding-right: 1rem !important;
             }
-            .simple-day {
-                aspect-ratio: 1 / 1;
+
+            /* 2. 【最優先】レスポンシブ・横7列強制CSS */
+            [data-testid="stHorizontalBlock"] {
+                display: flex !important;
+                flex-direction: row !important;
+                flex-wrap: nowrap !important;
+                width: 100% !important;
+                gap: 0px !important;
+            }
+            [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+                width: 14.28% !important;
+                min-width: 0 !important; /* スマホでの縦積みを物理的に阻止 */
+                flex: 1 1 14.28% !important;
+                padding: 0 !important;
+            }
+
+            /* ボタンのデザイン：透明にして数字だけを浮かせる */
+            div.stButton > button {
+                width: 100% !important;
+                height: 42px !important;
+                background-color: transparent !important;
+                border: none !important;
+                color: #333 !important;
+                font-weight: 500 !important;
+                font-size: 17px !important;
+                padding: 0 !important;
+                margin: 0 !important;
+                display: flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                transition: background-color 0.2s ease !important;
+            }
+
+            /* 選択中の日付：iOS風の青い円形強調 (#007AFF) */
+            .selected-day-marker button {
+                background-color: #007AFF !important;
+                color: white !important;
+                border-radius: 50% !important;
+                width: 34px !important;
+                height: 34px !important;
+                margin: 4px auto !important;
+                font-weight: bold !important;
+            }
+
+            /* ドット表示（支出＝赤、収入＝青） */
+            .dot-area {
                 display: flex;
-                align-items: center;
                 justify-content: center;
-                font-size: 14px;
-                border-radius: 8px;
-                border: 1px solid #f0f0f5;
-                background-color: #ffffff;
+                gap: 3px;
+                height: 6px;
+                margin-top: -6px;
+                padding-bottom: 6px;
             }
-            .has-exp { background-color: #fff5f5; border-color: #ffcdd2; color: #d32f2f; }
-            .has-inc { background-color: #f5fff5; border-color: #c8e6c9; color: #388e3c; }
-            .has-both { background-color: #f0f4ff; border-color: #c5cae9; color: #303f9f; }
-            .is-today { font-weight: bold; border: 2px solid #000; }
-            .wd-label { font-size: 10px; color: #888; text-align: center; padding-bottom: 5px; }
+            .dot-red { width: 5px; height: 5px; border-radius: 50%; background-color: #FF3B30; }
+            .dot-blue { width: 5px; height: 5px; border-radius: 50%; background-color: #007AFF; }
+            
+            /* 明細カードのデザイン */
+            .entry-card {
+                background: #ffffff;
+                border-radius: 12px;
+                padding: 12px 16px;
+                margin-bottom: 8px;
+                box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+                border-left: 5px solid #007AFF;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+            .entry-card.expense { border-left-color: #FF3B30; }
+            .entry-main { flex: 1; }
+            .entry-cat { font-weight: bold; font-size: 15px; color: #1c1c1e; }
+            .entry-memo { font-size: 12px; color: #8e8e93; }
+            .entry-amt { font-weight: bold; font-size: 15px; }
         </style>
         """, unsafe_allow_html=True)
 
-        # カレンダー計算用
-        cal = calendar.monthcalendar(st.session_state.view_date.year, st.session_state.view_date.month)
-        spent_days = set(this_month_df[this_month_df["タイプ"] == "支出"]["日付"].apply(lambda x: x.day)) if (isinstance(this_month_df, pd.DataFrame) and not this_month_df.empty) else set()
-        income_days = set(this_month_df[this_month_df["タイプ"] == "収入"]["日付"].apply(lambda x: x.day)) if (isinstance(this_month_df, pd.DataFrame) and not this_month_df.empty) else set()
-
-        # 曜日ヘッダー
-        wd_html = '<div class="simple-cal-container">' + "".join([f'<div class="wd-label">{d}</div>' for d in ["月","火","水","木","金","土","日"]]) + '</div>'
-        st.markdown(wd_html, unsafe_allow_html=True)
-
-        # カレンダーグリッドの生成（表示専用）
-        cal_html = '<div class="simple-cal-container">'
-        for week in cal:
-            for day in week:
-                if day == 0:
-                    cal_html += '<div style="border:none;"></div>'
-                else:
-                    h_exp = day in spent_days
-                    h_inc = day in income_days
-                    status_class = "has-both" if h_exp and h_inc else ("has-exp" if h_exp else ("has-inc" if h_inc else ""))
-                    today_class = "is-today" if day == datetime.date.today().day and st.session_state.view_date.month == datetime.date.today().month else ""
-                    cal_html += f'<div class="simple-day {status_class} {today_class}">{day}</div>'
-        cal_html += '</div>'
-        st.markdown(cal_html, unsafe_allow_html=True)
+        # --- 3. カレンダーの描画ロジック ---
+        st.write(f"#### 🗓️ {v_date.year}年{v_date.month}月")
         
-        st.markdown("---")
+        # 曜日ラベル (iOSカレンダー風グレー)
+        wd_row = st.columns(7)
+        for i, wd in enumerate(["月", "火", "水", "木", "金", "土", "日"]):
+            wd_row[i].markdown(f'<div style="text-align:center; font-size:11px; color:#c7c7cc; font-weight:bold;">{wd}</div>', unsafe_allow_html=True)
 
-        st.markdown('<div class="section-header">🖱️ 操作用カレンダー <span style="font-size:0.7em; color:#86868b; font-weight:400;">日付をタップして詳細を入力</span></div>', unsafe_allow_html=True)
-        # 曜日ヘッダー
-        wd_cols = st.columns(7)
-        weekdays = ["月", "火", "水", "木", "金", "土", "日"]
-        for i, wd in enumerate(weekdays):
-            wd_color = "#ff3b30" if i == 6 else ("#0071e3" if i == 5 else "#86868b")
-            wd_cols[i].markdown(f'<div style="text-align:center; font-size:12px; font-weight:600; color:{wd_color}; padding:4px 0;">{wd}</div>', unsafe_allow_html=True)
-
-        # カレンダー本体（ボタン式・詳細入力ポップアップ付き）
-        for week in cal:
-            week_cols = st.columns(7)
+        # カレンダー本体：ボタンとドットの配置
+        cal_matrix = calendar.monthcalendar(v_date.year, v_date.month)
+        for week in cal_matrix:
+            cols = st.columns(7)
             for i, day in enumerate(week):
-                with week_cols[i]:
+                with cols[i]:
                     if day == 0:
                         st.write("")
                     else:
-                        # ポップアップ内への項目移植
-                        with st.popover(f"{day}", use_container_width=True):
-                            st.markdown(f"### 📝 {st.session_state.view_date.month}/{day} の記録")
+                        # 選択中判定
+                        is_current = (day == selected_date.day and v_date.month == selected_date.month and v_date.year == selected_date.year)
+                        
+                        # ボタンの描画
+                        if is_current:
+                            st.markdown('<div class="selected-day-marker">', unsafe_allow_html=True)
+                        
+                        if st.button(str(day), key=f"d_btn_{day}"):
+                            st.session_state.selected_date = datetime.date(v_date.year, v_date.month, day)
+                            st.rerun()
                             
-                            # 削除したフォームから移植した項目
-                            p_type = st.radio("タイプ", ["支出", "収入"], horizontal=True, key=f"p_type_{day}")
-                            
-                            col_p1, col_p2 = st.columns(2)
-                            with col_p1:
-                                p_cat = st.selectbox("カテゴリー", EXPENSE_CATEGORIES if p_type=="支出" else INCOME_CATEGORIES, key=f"p_cat_{day}")
-                            with col_p2:
-                                p_tag = st.selectbox("性質", ["消費 (Need)", "投資 (Investment)", "浪費 (Want)"] if p_type=="支出" else ["収入"], key=f"p_tag_{day}")
-                            
-                            p_amt = st.number_input("金額 (円)", min_value=0, step=100, key=f"p_amt_{day}")
-                            p_memo = st.text_input("内容・メモ", placeholder="例: ランチ、電気代", key=f"p_memo_{day}")
+                        if is_current:
+                            st.markdown('</div>', unsafe_allow_html=True)
+                        
+                        # ドット判定と描画
+                        dots = '<div class="dot-area">'
+                        if day in spent_days: dots += '<div class="dot-red"></div>'
+                        if day in income_days: dots += '<div class="dot-blue"></div>'
+                        dots += '</div>'
+                        st.markdown(dots, unsafe_allow_html=True)
 
-                            if st.button("この内容で登録", key=f"p_btn_{day}", type="primary", use_container_width=True):
-                                try:
-                                    new_entry = {
-                                        "user_id": st.session_state["username"],
-                                        "日付": datetime.date(st.session_state.view_date.year, st.session_state.view_date.month, day),
-                                        "タイプ": p_type,
-                                        "カテゴリー": p_cat,
-                                        "性質": p_tag,
-                                        "金額": p_amt,
-                                        "内容": p_memo if p_memo else "（未入力）"
-                                    }
-                                    
-                                    # 保存と反映の処理
-                                    st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame([new_entry])], ignore_index=True)
-                                    save_data(st.session_state.df, st.session_state["username"])
-                                    update_bs_from_transactions([new_entry], st.session_state["username"])
-                                    
-                                    st.success("保存完了！")
-                                    st.rerun() # ← これで上部の「表示専用カレンダー」の色も即座に変わります
-                                except Exception as e:
-                                    st.error(f"❌ 保存に失敗しました: {e}")
+        st.markdown("---")
 
-        # 注釈
-        st.markdown('''
-        <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center; font-size:12px; color:#86868b; margin-top:4px;">
-            <span>👆 日付タップで詳細を入力して登録できます</span>
-        </div>
-        ''', unsafe_allow_html=True)
+        # --- 4. 【詳細表示】選択した日の明細リスト ---
+        st.markdown(f"### 📋 {selected_date.strftime('%m/%d')} の明細")
+        if detail_data.empty:
+            st.info("この日の記録はまだありません。")
+        else:
+            for _, row in detail_data.iterrows():
+                is_exp = (row["タイプ"] == "支出")
+                cls = "expense" if is_exp else "income"
+                clr = "#FF3B30" if is_exp else "#007AFF"
+                mark = "▲" if is_exp else "▼"
+                st.markdown(f"""
+                <div class="entry-card {cls}">
+                    <div class="entry-main">
+                        <div class="entry-cat">{row['カテゴリー']}</div>
+                        <div class="entry-memo">{row['内容']}</div>
+                    </div>
+                    <div class="entry-amt" style="color:{clr};">{mark} {row['金額']:,}円</div>
+                </div>
+                """, unsafe_allow_html=True)
+
         st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("---")
+
+        # --- 5. 【入力フォーム】リアルタイム連動型設定 ---
+        st.markdown("### ✍️ 取引を記録する")
+        
+        # カレンダーで選んだ日付が自動的にセットされる
+        input_d = st.date_input("日付", value=selected_date, key="date_sync_input")
+        # 手動で日付選択された場合の再同期
+        if input_d != st.session_state.selected_date:
+            st.session_state.selected_date = input_d
+            st.rerun()
+
+        p_type = st.radio("タイプ", ["支出", "収入"], horizontal=True, key="input_type_radio")
+        
+        # タイプ選択で即座にカテゴリーの選択肢を切り替え
+        cats = EXPENSE_CATEGORIES if p_type == "支出" else INCOME_CATEGORIES
+        col_c1, col_c2 = st.columns(2)
+        with col_c1:
+            p_cat = st.selectbox("カテゴリー", cats, key="input_cat_select")
+        with col_c2:
+            p_tag = "収入"
+            if p_type == "支出":
+                p_tag = st.selectbox("性質", ["消費 (Need)", "投資 (Investment)", "浪費 (Want)"], key="input_tag_select")
+
+        p_amt = st.number_input("金額 (円)", min_value=0, step=100, key="input_amt_number")
+        p_memo = st.text_input("内容・メモ (任意)", key="input_memo_text")
+
+        if st.button("🚀 この内容で登録する", type="primary", use_container_width=True):
+            if p_amt > 0:
+                new_entry = {
+                    "user_id": st.session_state["username"],
+                    "日付": input_d,
+                    "タイプ": p_type,
+                    "カテゴリー": p_cat,
+                    "性質": p_tag,
+                    "金額": p_amt,
+                    "内容": p_memo if p_memo else "（未入力）"
+                }
+                # データの反映と保存
+                st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame([new_entry])], ignore_index=True)
+                save_data(st.session_state.df, st.session_state["username"])
+                update_bs_from_transactions([new_entry], st.session_state["username"])
+                
+                st.success(f"✅ {input_d} のデータを登録しました！")
+                st.rerun()
+            else:
+                st.error("金額を入力してください")
 
     with tab_settings:
         st.header("⚙️ アプリケーション設定")
