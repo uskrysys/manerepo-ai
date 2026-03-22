@@ -2674,224 +2674,321 @@ def main_app_logic(user_id):
 
 
     with tab_input:
-        # --- 1. データ集計とエラー回避 (KeyError防止) ---
-        v_date = st.session_state.view_date
-        selected_date = st.session_state.selected_date
-        spent_days = set()
-        income_days = set()
-        
-        # データの安全な抽出
-        if not st.session_state.df.empty and "日付" in st.session_state.df.columns:
-            # 日付列を確実にdatetime64型に変換（AttributeError/KeyError対策）
-            df_snapshot = st.session_state.df.copy()
-            df_snapshot["日付"] = pd.to_datetime(df_snapshot["日付"])
-            
-            # 当月のデータを抽出
-            month_mask = (df_snapshot["日付"].dt.year == v_date.year) & (df_snapshot["日付"].dt.month == v_date.month)
-            month_df = df_snapshot[month_mask]
-            
-            # 収支があった日をセット化して高速判定
-            spent_days = set(month_df[month_df["タイプ"] == "支出"]["日付"].dt.day)
-            income_days = set(month_df[month_df["タイプ"] == "収入"]["日付"].dt.day)
-            
-            # 選択中の日の詳細リスト用データ
-            detail_data = month_df[month_df["日付"].dt.date == selected_date]
-        else:
-            detail_data = pd.DataFrame()
-
-        # --- 2. 【最優先】レスポンシブ・横7列強制CSS ---
-        st.markdown("""
+        # --- 1. 【CSS】モバイル完全固定レイアウト設定 ---
+        st.markdown(f"""
         <style>
-            /* 1. 【最優先】カレンダーを画面いっぱいに広げる（コンテナ制限解除） */
-            [data-testid="stAppViewBlockContainer"] {
-                max-width: 100% !important;
-                padding-left: 1rem !important;
-                padding-right: 1rem !important;
-            }
-
-            /* 2. 【最優先】レスポンシブ・横7列強制CSS */
-            [data-testid="stHorizontalBlock"] {
-                display: flex !important;
-                flex-direction: row !important;
-                flex-wrap: nowrap !important;
-                width: 100% !important;
-                gap: 0px !important;
-            }
-            [data-testid="stHorizontalBlock"] > [data-testid="column"] {
-                width: 14.28% !important;
-                min-width: 0 !important; /* スマホでの縦積みを物理的に阻止 */
-                flex: 1 1 14.28% !important;
-                padding: 0 !important;
-            }
-
-            /* ボタンのデザイン：透明にして数字だけを浮かせる */
-            div.stButton > button {
-                width: 100% !important;
-                height: 42px !important;
-                background-color: transparent !important;
-                border: none !important;
-                color: #333 !important;
-                font-weight: 500 !important;
-                font-size: 17px !important;
-                padding: 0 !important;
-                margin: 0 !important;
-                display: flex !important;
-                align-items: center !important;
-                justify-content: center !important;
-                transition: background-color 0.2s ease !important;
-            }
-
-            /* 選択中の日付：iOS風の青い円形強調 (#007AFF) */
-            .selected-day-marker button {
-                background-color: #007AFF !important;
-                color: white !important;
-                border-radius: 50% !important;
-                width: 34px !important;
-                height: 34px !important;
-                margin: 4px auto !important;
-                font-weight: bold !important;
-            }
-
-            /* ドット表示（支出＝赤、収入＝青） */
-            .dot-area {
-                display: flex;
-                justify-content: center;
-                gap: 3px;
-                height: 6px;
-                margin-top: -6px;
-                padding-bottom: 6px;
-            }
-            .dot-red { width: 5px; height: 5px; border-radius: 50%; background-color: #FF3B30; }
-            .dot-blue { width: 5px; height: 5px; border-radius: 50%; background-color: #007AFF; }
+            /* HTMLテーブルによる絶対的な7列定義 */
+            .n-cal {{ width: 100%; border-collapse: collapse; table-layout: fixed; margin-bottom: 20px; }}
+            .n-cal th {{ text-align: center; font-size: 11px; color: #8e8e93; padding: 4px 0; font-weight: bold; text-transform: uppercase; }}
+            .n-cal td {{ border: 0.5px solid #f2f2f7; text-align: center; height: 54px; position: relative; vertical-align: middle; background-color: #fff; }}
+            .n-day-box {{ font-size: 14px; font-weight: 500; color: #1d1d1f; width: 32px; height: 32px; line-height: 32px; margin: 0 auto; transition: all 0.2s; }}
             
-            /* 明細カードのデザイン */
-            .entry-card {
+            /* 選択中と本日のスタイル */
+            .n-selected {{ background-color: #007AFF !important; color: white !important; border-radius: 50%; font-weight: bold; box-shadow: 0 2px 6px rgba(0,122,255,0.4); }}
+            .n-today {{ border: 1.5px solid #1d1d1f; border-radius: 50%; }}
+            
+            /* ドットコンテナ */
+            .n-dots {{ display: flex; justify-content: center; gap: 3px; margin-top: 2px; height: 5px; }}
+            .n-dot {{ width: 5px; height: 5px; border-radius: 50%; }}
+            .n-red {{ background-color: #FF3B30; }} /* 支出 */
+            .n-blue {{ background-color: #007AFF; }} /* 収入 */
+
+            /* 明細カード（テーブル後のリスト用） */
+            .detail-card {{
                 background: #ffffff;
                 border-radius: 12px;
-                padding: 12px 16px;
+                padding: 12px;
                 margin-bottom: 8px;
-                box-shadow: 0 1px 2px rgba(0,0,0,0.06);
-                border-left: 5px solid #007AFF;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.05);
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
-            }
-            .entry-card.expense { border-left-color: #FF3B30; }
-            .entry-main { flex: 1; }
-            .entry-cat { font-weight: bold; font-size: 15px; color: #1c1c1e; }
-            .entry-memo { font-size: 12px; color: #8e8e93; }
-            .entry-amt { font-weight: bold; font-size: 15px; }
+                border-left: 5px solid #007AFF;
+            }}
+            .detail-card.expense {{ border-left-color: #FF3B30; }}
+            
+            /* スマホで横並びのフォーム要素を縦にするためのメディアクエリ（テーブル以外） */
+            @media (max-width: 768px) {{
+                .stHorizontalBlock:not(:has(.n-cal)) {{ flex-direction: column !important; }}
+            }}
         </style>
         """, unsafe_allow_html=True)
 
-        # --- 3. カレンダーの描画ロジック ---
-        st.write(f"#### 🗓️ {v_date.year}年{v_date.month}月")
+
+        # --- 2. 【ロジック】データ抽出とカレンダー準備 ---
+        v_date = st.session_state.view_date
+        s_date = st.session_state.selected_date
+        today = datetime.date.today()
         
-        # 曜日ラベル (iOSカレンダー風グレー)
-        wd_row = st.columns(7)
-        for i, wd in enumerate(["月", "火", "水", "木", "金", "土", "日"]):
-            wd_row[i].markdown(f'<div style="text-align:center; font-size:11px; color:#c7c7cc; font-weight:bold;">{wd}</div>', unsafe_allow_html=True)
-
-        # カレンダー本体：ボタンとドットの配置
-        cal_matrix = calendar.monthcalendar(v_date.year, v_date.month)
-        for week in cal_matrix:
-            cols = st.columns(7)
-            for i, day in enumerate(week):
-                with cols[i]:
-                    if day == 0:
-                        st.write("")
-                    else:
-                        # 選択中判定
-                        is_current = (day == selected_date.day and v_date.month == selected_date.month and v_date.year == selected_date.year)
-                        
-                        # ボタンの描画
-                        if is_current:
-                            st.markdown('<div class="selected-day-marker">', unsafe_allow_html=True)
-                        
-                        if st.button(str(day), key=f"d_btn_{day}"):
-                            st.session_state.selected_date = datetime.date(v_date.year, v_date.month, day)
-                            st.rerun()
-                            
-                        if is_current:
-                            st.markdown('</div>', unsafe_allow_html=True)
-                        
-                        # ドット判定と描画
-                        dots = '<div class="dot-area">'
-                        if day in spent_days: dots += '<div class="dot-red"></div>'
-                        if day in income_days: dots += '<div class="dot-blue"></div>'
-                        dots += '</div>'
-                        st.markdown(dots, unsafe_allow_html=True)
-
-        st.markdown("---")
-
-        # --- 4. 【詳細表示】選択した日の明細リスト ---
-        st.markdown(f"### 📋 {selected_date.strftime('%m/%d')} の明細")
-        if detail_data.empty:
-            st.info("この日の記録はまだありません。")
-        else:
-            for _, row in detail_data.iterrows():
-                is_exp = (row["タイプ"] == "支出")
-                cls = "expense" if is_exp else "income"
-                clr = "#FF3B30" if is_exp else "#007AFF"
-                mark = "▲" if is_exp else "▼"
-                st.markdown(f"""
-                <div class="entry-card {cls}">
-                    <div class="entry-main">
-                        <div class="entry-cat">{row['カテゴリー']}</div>
-                        <div class="entry-memo">{row['内容']}</div>
-                    </div>
-                    <div class="entry-amt" style="color:{clr};">{mark} {row['金額']:,}円</div>
-                </div>
-                """, unsafe_allow_html=True)
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown("---")
-
-        # --- 5. 【入力フォーム】リアルタイム連動型設定 ---
-        st.markdown("### ✍️ 取引を記録する")
-        
-        # カレンダーで選んだ日付が自動的にセットされる
-        input_d = st.date_input("日付", value=selected_date, key="date_sync_input")
-        # 手動で日付選択された場合の再同期
-        if input_d != st.session_state.selected_date:
-            st.session_state.selected_date = input_d
-            st.rerun()
-
-        p_type = st.radio("タイプ", ["支出", "収入"], horizontal=True, key="input_type_radio")
-        
-        # タイプ選択で即座にカテゴリーの選択肢を切り替え
-        cats = EXPENSE_CATEGORIES if p_type == "支出" else INCOME_CATEGORIES
-        col_c1, col_c2 = st.columns(2)
-        with col_c1:
-            p_cat = st.selectbox("カテゴリー", cats, key="input_cat_select")
-        with col_c2:
-            p_tag = "収入"
-            if p_type == "支出":
-                p_tag = st.selectbox("性質", ["消費 (Need)", "投資 (Investment)", "浪費 (Want)"], key="input_tag_select")
-
-        p_amt = st.number_input("金額 (円)", min_value=0, step=100, key="input_amt_number")
-        p_memo = st.text_input("内容・メモ (任意)", key="input_memo_text")
-
-        if st.button("🚀 この内容で登録する", type="primary", use_container_width=True):
-            if p_amt > 0:
-                new_entry = {
-                    "user_id": st.session_state["username"],
-                    "日付": input_d,
-                    "タイプ": p_type,
-                    "カテゴリー": p_cat,
-                    "性質": p_tag,
-                    "金額": p_amt,
-                    "内容": p_memo if p_memo else "（未入力）"
-                }
-                # データの反映と保存
-                st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame([new_entry])], ignore_index=True)
-                save_data(st.session_state.df, st.session_state["username"])
-                update_bs_from_transactions([new_entry], st.session_state["username"])
-                
-                st.success(f"✅ {input_d} のデータを登録しました！")
+        # 月移動ナビゲーション
+        nav_c = st.columns([1, 2, 1])
+        with nav_c[0]:
+            if st.button("◀ 前月", key="cal_prev"):
+                st.session_state.view_date = (v_date - datetime.timedelta(days=1)).replace(day=1)
                 st.rerun()
+        with nav_c[1]:
+            st.markdown(f'<h3 style="text-align:center; margin:0;">{v_date.year}年{v_date.month}月</h3>', unsafe_allow_html=True)
+        with nav_c[2]:
+            if st.button("次月 ▶", key="cal_next"):
+                st.session_state.view_date = (v_date + datetime.timedelta(days=32)).replace(day=1)
+                st.rerun()
+
+        # KeyError防止とデータ抽出
+        spent_days, income_days = set(), set()
+        day_events = pd.DataFrame()
+        
+        if "df" in st.session_state and not st.session_state.df.empty and "日付" in st.session_state.df.columns:
+            # 日付型を統一
+            df_active = st.session_state.df.copy()
+            df_active["日付"] = pd.to_datetime(df_active["日付"]).dt.date
+            
+            # 当月のリスト抽出
+            m_mask = (df_active["日付"].apply(lambda x: x.year == v_date.year and x.month == v_date.month))
+            m_df = df_active[m_mask]
+            
+            # ドット判定用の日別セット
+            spent_days = set(m_df[m_df["タイプ"] == "支出"]["日付"].apply(lambda x: x.day))
+            income_days = set(m_df[m_df["タイプ"] == "収入"]["日付"].apply(lambda x: x.day))
+            
+            # 選択された日の詳細
+            day_events = m_df[m_df["日付"] == s_date]
+        # --- 3. 【UI】絶対崩れない「埋め込み型」カレンダー ---
+        import streamlit.components.v1 as components
+        st.markdown("### 🗓️ 収支状況カレンダー")
+        
+        month_cal = calendar.monthcalendar(v_date.year, v_date.month)
+        today = datetime.date.today()
+        
+        # Iframe内用のHTML/CSS構築
+        html_body = f"""
+        <style>
+            body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background-color: transparent; }}
+            .n-cal {{ width: 100%; border-collapse: collapse; table-layout: fixed; }}
+            .n-cal th {{ text-align: center; font-size: 11px; color: #8e8e93; padding: 8px 0; font-weight: bold; text-transform: uppercase; }}
+            .n-cal td {{ border: 0.5px solid #f2f2f7; text-align: center; height: 50px; position: relative; vertical-align: middle; background-color: #fff; }}
+            .n-day-box {{ font-size: 14px; font-weight: 500; color: #1d1d1f; width: 32px; height: 32px; line-height: 32px; margin: 0 auto; }}
+            
+            /* 選択中と本日のスタイル */
+            .n-selected {{ background-color: #007AFF !important; color: white !important; border-radius: 50%; font-weight: bold; box-shadow: 0 2px 6px rgba(0,122,255,0.4); }}
+            .n-today {{ border: 1.5px solid #1d1d1f; border-radius: 50%; }}
+            
+            /* ドットコンテナ */
+            .n-dots {{ display: flex; justify-content: center; gap: 3px; margin-top: 2px; height: 5px; }}
+            .n-dot {{ width: 5px; height: 5px; border-radius: 50%; }}
+            .n-red {{ background-color: #FF3B30; }}
+            .n-blue {{ background-color: #007AFF; }}
+        </style>
+        <table class="n-cal">
+            <tr><th>月</th><th>火</th><th>水</th><th>木</th><th>金</th><th>土</th><th>日</th></tr>
+        """
+
+        for week in month_cal:
+            html_body += "<tr>"
+            for i, day in enumerate(week):
+                if day == 0:
+                    html_body += "<td></td>"
+                else:
+                    # 状態判定
+                    is_selected = (day == s_date.day and v_date.month == s_date.month and v_date.year == s_date.year)
+                    is_today = (day == today.day and v_date.month == today.month and v_date.year == today.year)
+                    
+                    # クラス設定
+                    day_cls = "n-day-box"
+                    if is_selected: day_cls += " n-selected"
+                    elif is_today: day_cls += " n-today"
+                    
+                    # ドット判定
+                    dots_html = '<div class="n-dots">'
+                    if day in income_days: dots_html += '<div class="n-dot n-blue"></div>'
+                    if day in spent_days: dots_html += '<div class="n-dot n-red"></div>'
+                    dots_html += '</div>'
+
+                    html_body += f"""
+                    <td>
+                        <div class="{day_cls}">{day}</div>
+                        {dots_html}
+                    </td>
+                    """
+            html_body += "</tr>"
+        html_body += "</table>"
+        
+        # 独立した窓として表示（高さを自動調整）
+        h_val = 300 if len(month_cal) <= 4 else (350 if len(month_cal) <= 5 else 400)
+        components.html(html_body, height=h_val, scrolling=False)
+        
+        st.markdown('<p style="font-size:12px; color:#8e8e93; margin-top:-10px;">※ 日付の変更は下の「記録フォーム」より行ってください。</p>', unsafe_allow_html=True)
+
+        st.markdown("---")
+
+        # --- 4. 【詳細見出し ＆ 入力フォーム】 ---
+        # カレンダー以外の st.columns はスマホで縦に並ぶ
+        f_col1, f_col2 = st.columns(2)
+        
+        with f_col1:
+            st.markdown(f"#### 🔎 {s_date.strftime('%m/%d')} の明細")
+            if day_events.empty:
+                st.caption("この日の記録はありません。")
             else:
-                st.error("金額を入力してください")
+                for _, row in day_events.iterrows():
+                    is_ex = (row["タイプ"] == "支出")
+                    st.markdown(f"""
+                    <div class="detail-card {'expense' if is_ex else ''}">
+                        <div>
+                            <div style="font-weight:bold; font-size:14px; color:#1d1d1f;">{row['カテゴリー']}</div>
+                            <div style="font-size:12px; color:#8e8e93;">{row['内容']}</div>
+                        </div>
+                        <div style="font-weight:900; color:{'#FF3B30' if is_ex else '#007AFF'};">
+                            {'-' if is_ex else '+'}{row['金額']:,}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+        with f_col2:
+            st.markdown("#### ✍️ 収支を記録")
+            # st.form は使用せず、即時連携
+            i_date = st.date_input("日付", value=s_date, key="qi_date")
+            if i_date != s_date:
+                st.session_state.selected_date = i_date
+                st.rerun()
+                
+            i_type = st.radio("タイプ", ["支出", "収入"], horizontal=True, label_visibility="collapsed")
+            
+            # カテゴリ・性質の切替
+            if i_type == "支出":
+                i_cats = st.session_state.get('expense_categories', DEFAULT_EXPENSE_CATEGORIES)
+                i_tags = ["消費 (Need)", "投資 (Investment)", "浪費 (Want)"]
+            else:
+                i_cats = INCOME_CATEGORIES
+                i_tags = ["収入"]
+                
+            cat_c, tag_c = st.columns(2)
+            i_cat = cat_c.selectbox("カテゴリ", i_cats, key="sel_cat")
+            i_tag = tag_c.selectbox("性質", i_tags, key="sel_tag")
+            
+            i_amt = st.number_input("金額 (円)", min_value=0, step=1000, key="num_amt")
+            i_memo = st.text_input("内容・メモ (任意)", key="txt_memo")
+            
+            if st.button("🚀 登録", use_container_width=True, type="primary", key="btn_reg"):
+                if i_amt > 0:
+                    new_rec = {
+                        "user_id": st.session_state.username,
+                        "日付": i_date,
+                        "タイプ": i_type,
+                        "カテゴリー": i_cat,
+                        "内容": i_memo if i_memo else "（未入力）",
+                        "金額": i_amt,
+                        "性質": i_tag
+                    }
+                    st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame([new_rec])], ignore_index=True)
+                    save_data(st.session_state.df, st.session_state.username)
+                    update_bs_from_transactions([new_rec], st.session_state.username)
+                    st.toast("✅ 登録しました！")
+                    st.rerun()
+                else:
+                    st.error("金額を入力してください")
+
+        # --- 5. 【管理統合】サマリー ＆ データ編集 ＆ CSV ---
+        st.markdown('<div class="section-header">💾 データ管理 ＆ 一括編集</div>', unsafe_allow_html=True)
+        
+        # サマリー
+        s1, s2, s3 = st.columns(3)
+        s1.metric("総レコード", f"{len(st.session_state.df)}件")
+        s2.metric(f"累計{get_label('income')}", f"{total_income_all:,.0f}円")
+        s3.metric(f"累計{get_label('expense')}", f"{total_expense:,.0f}円", delta_color="inverse")
+
+        # データ管理テーブル
+        h_df = st.session_state.df.copy()
+        if not h_df.empty:
+            h_df.insert(0, "🗑️ 選択", False)
+            e_df = st.data_editor(
+                h_df,
+                use_container_width=True,
+                num_rows="dynamic",
+                column_config={
+                    "🗑️ 選択": st.column_config.CheckboxColumn("🗑️", default=False),
+                    "日付": st.column_config.DateColumn("日付", required=True),
+                    "タイプ": st.column_config.SelectboxColumn("タイプ", options=["支出", "収入"], required=True),
+                    "カテゴリー": st.column_config.SelectboxColumn("カテゴリー", options=EXPENSE_CATEGORIES + INCOME_CATEGORIES, required=True),
+                    "性質": st.column_config.SelectboxColumn("性質", options=CONSUMPTION_TAGS + ["収入"], required=True),
+                    "金額": st.column_config.NumberColumn("金額", format="%d", min_value=0),
+                },
+                key="editor_integrated"
+            )
+            manage_data_ui(e_df, st.session_state.df, "df", "df_backup", save_data, ["日付", "カテゴリー", "金額"])
+
+        def apply_smart_labeling(import_df, history_df):
+            """過去の入力履歴（内容とカテゴリーの対応）を元に、CSVインポートデータのカテゴリーを自動推測する"""
+            if import_df.empty or history_df.empty:
+                return import_df
+            history_map = {}
+            for _, row in history_df.sort_values('日付', ascending=False).iterrows():
+                content = str(row.get('内容', '')).strip()
+                cat = str(row.get('カテゴリー', '')).strip()
+                if content and content != "（未入力）" and cat and cat != '未分類' and content not in history_map:
+                    history_map[content] = cat
+            new_cats = []
+            for _, row in import_df.iterrows():
+                current_cat = row.get('カテゴリー', '未分類')
+                if current_cat != '未分類':
+                    new_cats.append(current_cat); continue
+                content = str(row.get('内容', '')).strip()
+                if content in history_map: new_cats.append(history_map[content])
+                else:
+                    matched_cat = current_cat
+                    for p_content, p_cat in history_map.items():
+                        if len(p_content) >= 2 and p_content in content:
+                            matched_cat = p_cat
+                            break
+                    new_cats.append(matched_cat)
+            import_df['カテゴリー'] = new_cats
+            return import_df
+
+        # CSVインポートの統合
+        with st.expander("📥 CSVインポート"):
+            uploaded_csv = st.file_uploader("CSVを選択", type="csv", key="integrated_csv")
+            if uploaded_csv:
+                try:
+                    encoding = 'utf-8'
+                    try: csv_df = pd.read_csv(uploaded_csv, encoding=encoding)
+                    except UnicodeDecodeError: csv_df = pd.read_csv(uploaded_csv, encoding='shift-jis')
+                    
+                    st.write("プレビュー:", csv_df.head(3))
+                    cols = csv_df.columns.tolist()
+                    def guess(kws, cs):
+                        for c in cs:
+                            if any(k in str(c) for k in kws): return cs.index(c) + 1
+                        return 0
+                        
+                    m1, m2, m3, m4 = st.columns(4)
+                    i_date_c = m1.selectbox("日付列", ["(未指定)"] + cols, index=guess(["日付", "年月日", "date"], cols))
+                    i_amt_c = m2.selectbox("金額列", ["(未指定)"] + cols, index=guess(["金額", "支払", "amount"], cols))
+                    i_memo_c = m3.selectbox("内容列", ["(未指定)"] + cols, index=guess(["内容", "摘要", "memo"], cols))
+                    i_type_c = m4.selectbox("タイプ列", ["(未指定)"] + cols, index=guess(["タイプ", "区分", "入出"], cols))
+                    
+                    if st.button("🔍 プレビュー生成", use_container_width=True):
+                        if i_date_c != "(未指定)" and i_amt_c != "(未指定)":
+                            mapped = pd.DataFrame()
+                            mapped["user_id"] = st.session_state.username
+                            mapped["日付"] = pd.to_datetime(csv_df[i_date_c], errors="coerce").dt.date
+                            mapped["金額"] = pd.to_numeric(csv_df[i_amt_c].astype(str).str.replace(r'[^\d\-]', '', regex=True), errors="coerce").fillna(0).astype(int)
+                            mapped["内容"] = csv_df[i_memo_c].fillna("（未入力）") if i_memo_c != "(未指定)" else "（未入力）"
+                            mapped["タイプ"] = csv_df[i_type_c].apply(lambda x: "収入" if "入" in str(x) or "収" in str(x) else "支出") if i_type_c != "(未指定)" else "支出"
+                            mapped["カテゴリー"] = "未分類"
+                            mapped["性質"] = mapped.apply(lambda r: "収入" if r["タイプ"] == "収入" else "消費 (Need)", axis=1)
+                            st.session_state.import_preview_df = apply_smart_labeling(mapped, st.session_state.df).dropna(subset=["日付"])
+                
+                    if "import_preview_df" in st.session_state:
+                        st.markdown("##### プレビューの修正と確定")
+                        edited_p = st.data_editor(st.session_state.import_preview_df, use_container_width=True, key="imp_edit")
+                        if st.button("📥 インポート確定", use_container_width=True, type="primary"):
+                            st.session_state.df = pd.concat([st.session_state.df, edited_p], ignore_index=True)
+                            save_data(st.session_state.df, st.session_state.username)
+                            update_bs_from_transactions(edited_p.to_dict("records"), st.session_state.username)
+                            st.success("インポート完了！")
+                            del st.session_state.import_preview_df
+                            st.rerun()
+                except Exception as e: st.error(f"エラー: {e}")
+
 
     with tab_settings:
         st.header("⚙️ アプリケーション設定")
@@ -2965,212 +3062,8 @@ def main_app_logic(user_id):
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-    with tab_input:
-        # --- サマリーカード ---
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.markdown(f"""<div class="metric-card" style="border-left-color:#5c6bc0;">
-                <div class="label">🧾 総レコード数</div>
-                <div class="value" style="color:#5c6bc0;">{total_records}</div>
-            </div>""", unsafe_allow_html=True)
-        with c2:
-            st.markdown(f"""<div class="metric-card" style="border-left-color:#43a047;">
-                <div class="label">💰 {get_label("income_all")}</div>
-                <div class="value" style="font-size:1.5rem;">{total_income_all:,.0f}<span style="font-size:0.9rem;"> 円</span></div>
-            </div>""", unsafe_allow_html=True)
-        with c3:
-            st.markdown(f"""<div class="metric-card" style="border-left-color:#ef6c00;">
-                <div class="label">💸 累計{label_exp}</div>
-                <div class="value" style="color:#ef6c00; font-size:1.5rem;">{total_expense:,.0f}<span style="font-size:0.9rem;"> 円</span></div>
-            </div>""", unsafe_allow_html=True)
+    # (tab_input の機能は最適化され、上のセクションに統合されました)
 
-        st.markdown('<div class="section-header">💾 データ編集・管理</div>', unsafe_allow_html=True)
-        st.info("✨ **編集のヒント**: 表の**最下部にある空行**をクリックすると、新しいデータを直接追加できます。")
-        st.caption("テーブルを編集すると画面上のサマリーやグラフに即座に反映されます。編集内容は自動的に保存されます。")
-        st.warning("⚠️ **【重要】過去データの編集・削除時における注意点**\n\nここでの編集や削除は、**銀行口座などの資産残高（BS）には自動連動しません**。過去データの金額を変更した場合は、「🏦 純資産(BS)」タブから手動で現在の口座残高を調整してください。")
-
-        # 選択列を追加して一括削除用チェックボックスを作成
-        display_df = st.session_state.df.copy()
-        display_df.insert(0, "🗑️ 選択", False)
-
-        edited_df = st.data_editor(
-            display_df,
-            use_container_width=True,
-            num_rows="dynamic",
-            column_config={
-                "🗑️ 選択": st.column_config.CheckboxColumn("🗑️", default=False, help="チェックして一括削除"),
-                "user_id": st.column_config.TextColumn("User ID", disabled=True),
-                "日付": st.column_config.DateColumn("日付", required=True),
-                "タイプ": st.column_config.SelectboxColumn("タイプ", options=["支出", "収入"], required=True),
-                "カテゴリー": st.column_config.SelectboxColumn("カテゴリー", options=EXPENSE_CATEGORIES + INCOME_CATEGORIES, required=True),
-                "性質": st.column_config.SelectboxColumn("性質", options=CONSUMPTION_TAGS + ["収入"], required=True),
-                "金額": st.column_config.NumberColumn("金額", min_value=0, step=100, required=True, format="%d"),
-            },
-            key="data_editor_main"
-        )
-
-        manage_data_ui(
-            edited_df=edited_df,
-            original_df=st.session_state.df,
-            session_key="df",
-            backup_key="df_backup",
-            save_func=save_data,
-            required_cols=["日付", "カテゴリー", "金額"],
-            is_bs=False
-        )
-
-        def apply_smart_labeling(import_df, history_df):
-            """過去の入力履歴（内容とカテゴリーの対応）を元に、CSVインポートデータのカテゴリーを自動推測する"""
-            if import_df.empty or history_df.empty:
-                return import_df
-            
-            # 直近の履歴を優先するため降順でマッピング
-            history_map = {}
-            for _, row in history_df.sort_values('日付', ascending=False).iterrows():
-                content = str(row.get('内容', '')).strip()
-                cat = str(row.get('カテゴリー', '')).strip()
-                if content and content != "（未入力）" and cat and cat != '未分類' and content not in history_map:
-                    history_map[content] = cat
-                    
-            # インポートするデータに対して推測適用
-            new_cats = []
-            for _, row in import_df.iterrows():
-                current_cat = row.get('カテゴリー', '未分類')
-                if current_cat != '未分類':
-                    new_cats.append(current_cat)
-                    continue
-                    
-                content = str(row.get('内容', '')).strip()
-                # 1. 完全一致
-                if content in history_map:
-                    new_cats.append(history_map[content])
-                else:
-                    # 2. 部分一致（過去の「内容」が、今回の「内容」に含まれているか）
-                    matched_cat = current_cat
-                    for p_content, p_cat in history_map.items():
-                        if len(p_content) >= 2 and p_content in content:
-                            matched_cat = p_cat
-                            break
-                    new_cats.append(matched_cat)
-                    
-            import_df['カテゴリー'] = new_cats
-            return import_df
-
-        st.markdown('<div class="section-header">📥 銀行・クレカCSVインポート (インテリジェント読込)</div>', unsafe_allow_html=True)
-        st.caption("銀行やクレジットカードのCSVをアップロード後、列名をマッピングして一括登録できます。")
-        uploaded_csv = st.file_uploader("CSVファイルを選択してください", type="csv")
-        if uploaded_csv:
-            try:
-                # 文字コードの自動判別（UTF-8かShift-JISか）
-                raw_data = uploaded_csv.read()
-                uploaded_csv.seek(0) # ポインタを戻す
-
-                try:
-                    csv_df = pd.read_csv(uploaded_csv, encoding='utf-8')
-                except UnicodeDecodeError:
-                    uploaded_csv.seek(0)
-                    csv_df = pd.read_csv(uploaded_csv, encoding='shift-jis')
-
-                st.write("プレビュー (最初の5行):", csv_df.head())
-
-                st.markdown("#### 🔄 カラムのマッピング")
-                st.caption("アップロードしたCSVのどの列が、アプリ内の各項目に対応するかを選択してください。")
-                cols = csv_df.columns.tolist()
-
-                # カラム推測ロジック
-                def guess_col(keywords, columns):
-                    for c in columns:
-                        if any(kw in str(c) for kw in keywords):
-                            return columns.index(c) + 1
-                    return 0
-
-                map_c1, map_c2, map_c3, map_c4 = st.columns(4)
-                with map_c1:
-                    idx_date = guess_col(["日付", "年月日", "date", "Date"], cols)
-                    date_col = st.selectbox("📅 日付 に該当する列", options=["（選択しない）"] + cols, index=idx_date)
-                with map_c2:
-                    idx_amt = guess_col(["金額", "振込", "支払", "amount", "Amount", "税込"], cols)
-                    amt_col = st.selectbox("💰 金額 に該当する列", options=["（選択しない）"] + cols, index=idx_amt)
-                with map_c3:
-                    idx_memo = guess_col(["内容", "摘要", "メモ", "memo", "Description", "利用店"], cols)
-                    memo_col = st.selectbox("📝 内容 に該当する列", options=["（選択しない）"] + cols, index=idx_memo)
-                with map_c4:
-                    idx_type = guess_col(["タイプ", "入出", "区分", "type", "Type"], cols)
-                    type_col = st.selectbox("🔄 タイプ(収入/支出) 列", options=["（選択しない）"] + cols, index=idx_type)
-
-                # TODO: 収入・支出の固定指定や、金額の正負での判定も可能だが、今回はシンプルなマッピングを優先
-                default_type_fallback = st.radio("「タイプ」列がない場合のデフォルト:", ["支出", "収入"], horizontal=True)
-
-                # CSV分析の実行
-                if st.button("🚀 マッピング設定でプレビュー表示", use_container_width=True):
-                    if date_col == "（選択しない）" or amt_col == "（選択しない）":
-                        st.error("⚠️ 最低限、「日付」と「金額」の列はマッピングしてください。")
-                    else:
-                        mapped_df = pd.DataFrame()
-                        mapped_df["user_id"] = st.session_state["username"]
-                        mapped_df["日付"] = pd.to_datetime(csv_df[date_col], errors="coerce").dt.date
-                        amt_series = csv_df[amt_col].astype(str).str.replace(r'[^\d\-]', '', regex=True)
-                        mapped_df["金額"] = pd.to_numeric(amt_series, errors="coerce").fillna(0).astype(int)
-
-                        if memo_col != "（選択しない）":
-                            mapped_df["内容"] = csv_df[memo_col].fillna("（未入力）")
-                        else:
-                            mapped_df["内容"] = "（未入力）"
-
-                        if type_col != "（選択しない）":
-                            mapped_df["タイプ"] = csv_df[type_col].apply(lambda x: "収入" if "入" in str(x) or "収" in str(x) else "支出")
-                        else:
-                            mapped_df["タイプ"] = default_type_fallback
-
-                        mapped_df["カテゴリー"] = "未分類"
-                        mapped_df["性質"] = mapped_df.apply(lambda row: "収入" if row["タイプ"] == "収入" else "消費 (Need)", axis=1)
-
-                        # AI判定による自動ラベリング (Step 2.1)
-                        mapped_df = apply_smart_labeling(mapped_df, st.session_state.df)
-
-                        # プレビュー表示（session_stateに一時保存）
-                        st.session_state.import_preview_df = mapped_df.dropna(subset=["日付", "金額"])
-
-                if "import_preview_df" in st.session_state and not st.session_state.import_preview_df.empty:
-                    st.markdown("#### 📝 インポート前の一括確認・修正 (Step 2.2)")
-                    st.caption("AIが自動判定したカテゴリーを確認し、必要に応じてドロップダウンから直接修正してください。")
-
-                    # 未分類を上位に表示
-                    preview_df = st.session_state.import_preview_df.copy()
-                    preview_df["sort_order"] = preview_df["カテゴリー"].apply(lambda x: 0 if x == "未分類" else 1)
-                    preview_df = preview_df.sort_values("sort_order").drop(columns=["sort_order"])
-
-                    edited_import_df = st.data_editor(
-                        preview_df,
-                        use_container_width=True,
-                        num_rows="dynamic",
-                        column_config={
-                            "user_id": st.column_config.TextColumn("User", disabled=True),
-                            "日付": st.column_config.DateColumn("日付"),
-                            "タイプ": st.column_config.SelectboxColumn("タイプ", options=["支出", "収入"]),
-                            "カテゴリー": st.column_config.SelectboxColumn("カテゴリー", options=EXPENSE_CATEGORIES + INCOME_CATEGORIES),
-                            "性質": st.column_config.SelectboxColumn("性質", options=CONSUMPTION_TAGS + ["収入"]),
-                            "金額": st.column_config.NumberColumn("金額", format="%d"),
-                        },
-                        key="import_editor"
-                    )
-
-                    if st.button("📥 修正内容で確定インポート", use_container_width=True, type="primary"):
-                        st.session_state.df = pd.concat([st.session_state.df, edited_import_df], ignore_index=True)
-                        save_data(st.session_state.df, st.session_state["username"])
-                        
-                        # ===== BS側への連動更新 =====
-                        import_records = edited_import_df.to_dict("records")
-                        update_bs_from_transactions(import_records, st.session_state["username"])
-                        
-                        st.success(f"✅ {len(edited_import_df)} 件のデータを正式に登録しました！")
-                        del st.session_state.import_preview_df
-                        st.rerun()
-
-            except Exception as e:
-                st.error(f"CSVの読み込みに失敗しました: {e}")
-
-        st.markdown("<br><br>", unsafe_allow_html=True)
 
 
 
