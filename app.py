@@ -6,6 +6,7 @@ import calendar
 import base64
 import math
 import uuid
+import re  # 修正: re が定義されていないエラーを解消
 from typing import Any, Optional, List
 import plotly.graph_objects as go
 import plotly.express as px
@@ -424,6 +425,211 @@ FILENAME = "kakeibo_data_v2.csv"
 
 
 # --- 4. 共通ロジック & 関数 ---
+
+# --- Supabase 連携設定 & ユーティリティ ---
+DB_MAP_TX_TO_DB = {"日付": "date", "タイプ": "type", "カテゴリー": "category", "内容": "content", "金額": "amount", "性質": "transaction_type"}
+DB_MAP_TX_FROM_DB = {v: k for k, v in DB_MAP_TX_TO_DB.items()}
+
+DB_MAP_ASSET_TO_DB = {"日付": "date", "区分": "type", "項目名": "name", "金額": "amount"}
+DB_MAP_ASSET_FROM_DB = {v: k for k, v in DB_MAP_ASSET_TO_DB.items()}
+
+def get_supabase_client():
+    if not SUPABASE_AVAILABLE:
+        st.error("🚨 【エラー】 `supabase` ライブラリがインストールされていません。デプロイ環境の `requirements.txt` 等を確認してください。")
+        return None
+    try:
+        # secrets の構造を確認
+        if "supabase" in st.secrets:
+            url = st.secrets["supabase"]["url"]
+            key = st.secrets["supabase"]["key"]
+            return create_client(url, key)
+        else:
+            st.error("🚨 【エラー】 `.streamlit/secrets.toml` に `[supabase]` の設定項目が見つかりません。")
+            return None
+    except Exception as e:
+        st.error(f"🚨 【DB接続エラー】 Supabaseクライアントの初期化に失敗しました。URLやKeyが正しいか確認してください。（詳細: {e}）")
+        return None
+
+supabase = get_supabase_client()
+
+def get_user_uuid(user_id: str) -> str:
+    """ユーザー名から安定したUUIDを生成する。もし既にUUIDならそのまま返す。"""
+    try:
+        uuid.UUID(user_id)
+        return user_id
+    except (ValueError, TypeError):
+        if not user_id: return str(uuid.uuid4())
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, str(user_id)))
+
+def robust_supabase_upsert(table_name, data_list):
+    """
+    Supabaseへupsertを行う際、存在しないカラムが原因でエラーになった場合、
+    自動的にそのカラムを除去して再試行する自動適応関数。
+    """
+    if not data_list or not supabase: return
+    current_data = [d.copy() for d in data_list]
+    for _ in range(5):
+        try:
+            supabase.table(table_name).upsert(current_data).execute()
+            return
+        except Exception as e:
+            error_msg = str(e)
+            match = re.search(r"Could not find the '([^']+)' column", error_msg)
+            if match:
+                missing_col = match.group(1)
+                for item in current_data:
+                    item.pop(missing_col, None)
+            else:
+                raise e
+    raise Exception("テーブル定義の自動調整に失敗しました。")
+
+def insert_sample_data(user_id: str):
+    """新規ユーザー向けのサンプルデータ投入"""
+    user_uuid = get_user_uuid(user_id)
+    sample_txs = [
+        {
+            "user_id": user_uuid,
+            "username": user_id,
+            "date": datetime.date.today().strftime("%Y-%m-%d"),
+            "type": "支出",
+            "category": "食費",
+            "content": "サンプル：昼食代",
+            "amount": 1200,
+            "transaction_type": "消費 (Need)"
+        },
+        {
+            "user_id": user_uuid,
+            "username": user_id,
+            "date": datetime.date.today().strftime("%Y-%m-%d"),
+            "type": "収入",
+            "category": "主収入（給与・事業）",
+            "content": "サンプル：給与",
+            "amount": 250000,
+            "transaction_type": "投資 (Invest)"
+        }
+    ]
+    sample_assets = [
+        {
+            "user_id": user_uuid,
+            "date": datetime.date.today().strftime("%Y-%m-%d"),
+            "type": "流動資産 (現金・預金)",
+            "name": "メイン銀行",
+            "amount": 1000000
+        }
+    ]
+    try:
+        if supabase:
+            robust_supabase_upsert("transactions", sample_txs)
+            robust_supabase_upsert("assets", sample_assets)
+            st.toast("👋 ようこそ！操作イメージ用のサンプルデータを投入しました。")
+    except Exception as e:
+        st.error(f"サンプルデータの投入に失敗しました: {e}")
+
+@st.cache_data(ttl=60)
+def load_data(user_id: str):
+    user_uuid = get_user_uuid(user_id)
+    if supabase is not None:
+        try:
+            response = supabase.table("transactions").select("*").eq("user_id", user_uuid).order("date", desc=True).execute()
+            df = pd.DataFrame(response.data)
+            if not df.empty:
+                df = df.rename(columns=DB_MAP_TX_FROM_DB)
+                df["日付"] = pd.to_datetime(df["日付"]).dt.date
+                if "性質" not in df.columns:
+                    df["性質"] = "消費 (Need)"
+                return df
+            else:
+                insert_sample_data(user_id)
+                response = supabase.table("transactions").select("*").eq("user_id", user_uuid).order("date", desc=True).execute()
+                df = pd.DataFrame(response.data)
+                if not df.empty:
+                    df = df.rename(columns=DB_MAP_TX_FROM_DB)
+                    df["日付"] = pd.to_datetime(df["日付"]).dt.date
+                return df
+        except Exception as e:
+            st.warning(f"⚠️ Supabaseデータ読込エラー (Transactions): ネットワーク接続やテーブル定義を確認してください。詳細: {e}")
+    return pd.DataFrame(columns=["user_id", "日付", "タイプ", "カテゴリー", "内容", "金額", "性質"])
+
+def save_to_supabase(df, user_id: str):
+    """
+    データをSupabaseへ保存(upsert)する。各行にusernameを付与し、既存IDがあれば更新。
+    """
+    if supabase is None or df is None:
+        return
+
+    df = df.copy()
+    user_uuid = get_user_uuid(user_id)
+    df["user_id"] = user_uuid
+    df["username"] = user_id # ユーザーの要望: 各行にusernameを付与
+
+    try:
+        # 型変換と整形
+        if not df.empty:
+            if "金額" in df.columns:
+                df["金額"] = pd.to_numeric(df["金額"]).fillna(0).astype(int)
+            if "日付" in df.columns:
+                df["日付"] = pd.to_datetime(df["日付"]).dt.strftime("%Y-%m-%d")
+        
+        # DBカラム名へ変換
+        df = df.rename(columns=DB_MAP_TX_TO_DB)
+        
+        # 保存(upsert)実行
+        records = df.to_dict(orient="records")
+        if records:
+            robust_supabase_upsert("transactions", records)
+        
+        st.session_state.is_synced = True
+        # キャッシュをクリアして最新を反映
+        load_data.clear()
+    except Exception as e:
+        st.error(f"⚠️ Supabaseデータ保存エラー: ネットワーク接続やデータ形式を確認してください。詳細: {e}")
+        st.session_state.is_synced = False
+
+@st.cache_data(ttl=300)
+def load_assets_data(user_id: str):
+    user_uuid = get_user_uuid(user_id)
+    if supabase is not None:
+        try:
+            response = supabase.table("assets").select("*").eq("user_id", user_uuid).execute()
+            df = pd.DataFrame(response.data)
+            if not df.empty:
+                df = df.rename(columns=DB_MAP_ASSET_FROM_DB)
+                df["日付"] = pd.to_datetime(df["日付"]).dt.date
+                return df
+        except Exception as e:
+            st.warning(f"⚠️ Supabaseデータ読込エラー (Assets): {e}")
+    return pd.DataFrame(columns=["user_id", "日付", "区分", "項目名", "金額"])
+
+def save_assets_data(df, user_id: str):
+    if supabase is None:
+        return
+
+    df = df.copy()
+    user_uuid = get_user_uuid(user_id)
+    df["user_id"] = user_uuid
+    
+    try:
+        if not df.empty:
+            df["金額"] = pd.to_numeric(df["金額"]).fillna(0).astype(int)
+            df["日付"] = pd.to_datetime(df["日付"]).dt.strftime("%Y-%m-%d")
+        df = df.rename(columns=DB_MAP_ASSET_TO_DB)
+    except Exception as e:
+        st.error(f"BSデータ変換エラー: {e}")
+        return
+
+    try:
+        # Assetsもupsertに切り替え（既存はdelete->insertだったが、効率化のため）
+        records = df.to_dict(orient="records")
+        if records:
+            robust_supabase_upsert("assets", records)
+        load_assets_data.clear()
+    except Exception as e:
+        st.error(f"Supabase(BS)保存エラー: {e}")
+
+# 互換性のための既存関数名維持
+def save_data(df, user_id: str):
+    save_to_supabase(df, user_id)
+
 def apply_smart_labeling(df_import, history_df):
     """
     過去の履歴(history_df)から内容をキーにしてカテゴリーと性質を推論・自動補完する
@@ -446,12 +652,32 @@ def apply_smart_labeling(df_import, history_df):
             row["カテゴリー"] = mapping[content]["カテゴリー"]
             row["性質"] = mapping[content]["性質"]
         else:
-            # 類似（部分一致）の検索：2文字以上を条件とする
+            # 正規表現 / 部分一致の検索：2文字以上、大文字小文字無視
+            matched = False
             for key, vals in mapping.items():
-                if len(key) >= 2 and (key in content or content in key):
-                    row["カテゴリー"] = vals["カテゴリー"]
-                    row["性質"] = vals["性質"]
-                    break
+                if len(key) >= 2:
+                    try:
+                        if re.search(re.escape(key), content, re.IGNORECASE):
+                            row["カテゴリー"] = vals["カテゴリー"]
+                            row["性質"] = vals["性質"]
+                            matched = True
+                            break
+                    except:
+                        if key in content: # フォールバック
+                            row["カテゴリー"] = vals["カテゴリー"]
+                            row["性質"] = vals["性質"]
+                            matched = True
+                            break
+            
+            # カテゴリが特定できなかった場合、セッション内の直近選択値をデフォルトにする
+            if not matched:
+                # デフォルト値の設定（もしセッションになければ標準値を設定）
+                if row.get("タイプ") == "収入":
+                    row["カテゴリー"] = st.session_state.get("last_income_cat", "主収入（給与・事業）")
+                    row["性質"] = "収入"
+                else:
+                    row["カテゴリー"] = st.session_state.get("last_expense_cat", "食費")
+                    row["性質"] = st.session_state.get("last_expense_tag", "消費 (Need)")
         return row
 
     return df_import.apply(fill_row, axis=1)
@@ -533,6 +759,16 @@ def main_app_logic(user_id):
         help="収入－支出で毎月この額を黒字にする目標です"
     )
     
+    # --- 5.2 URLパラメータからの日付同期 (Phase 2) ---
+    if "date" in st.query_params:
+        try:
+            param_date = datetime.date.fromisoformat(st.query_params["date"])
+            if param_date != st.session_state.selected_date:
+                st.session_state.selected_date = param_date
+                # st.rerun() は query_params 変更時に自動で走るため、明示的な rerun は不要
+        except:
+            pass
+
     st.sidebar.markdown("---")
 
     
@@ -641,202 +877,7 @@ def main_app_logic(user_id):
     
     
     
-    def get_supabase_client():
-        if not SUPABASE_AVAILABLE: return None
-        try:
-            url = st.secrets["supabase"]["url"]
-            key = st.secrets["supabase"]["key"]
-            return create_client(url, key)
-        except Exception as e:
-            # st.error(f"Supabase接続エラー: {e}")
-            return None
-    
-    supabase = get_supabase_client()
-    
-    def get_user_uuid(user_id: str) -> str:
-        """ユーザー名から安定したUUIDを生成する。もし既にUUIDならそのまま返す。"""
-        try:
-            uuid.UUID(user_id)
-            return user_id
-        except ValueError:
-            return str(uuid.uuid5(uuid.NAMESPACE_URL, user_id))
-    
-    DB_MAP_TX_TO_DB = {"日付": "date", "タイプ": "type", "カテゴリー": "category", "内容": "content", "金額": "amount", "性質": "transaction_type"}
-    DB_MAP_TX_FROM_DB = {v: k for k, v in DB_MAP_TX_TO_DB.items()}
-    
-    DB_MAP_ASSET_TO_DB = {"日付": "date", "区分": "type", "項目名": "name", "金額": "amount"}
-    DB_MAP_ASSET_FROM_DB = {v: k for k, v in DB_MAP_ASSET_TO_DB.items()}
-    
-    import re
-    
-    def robust_supabase_insert(table_name, data_list):
-        """
-        Supabaseへinsertを行う際、存在しないカラム（例：natureやtransaction_type）
-        が原因でエラーになった場合、自動的にそのカラムを除去して再試行する自動適応関数。
-        """
-        if not data_list: return
-        current_data = [d.copy() for d in data_list]
-        for _ in range(5):
-            try:
-                supabase.table(table_name).insert(current_data).execute()
-                return
-            except Exception as e:
-                error_msg = str(e)
-                match = re.search(r"Could not find the '([^']+)' column", error_msg)
-                if match:
-                    missing_col = match.group(1)
-                    for item in current_data:
-                        item.pop(missing_col, None)
-                else:
-                    raise e
-        raise Exception("テーブル定義の自動調整に失敗しました。")
-    
-    def insert_sample_data(user_id: str):
-        """新規ユーザー向けのサンプルデータ投入"""
-        user_uuid = get_user_uuid(user_id)
-        sample_txs = [
-            {
-                "user_id": user_uuid,
-                "date": datetime.date.today().strftime("%Y-%m-%d"),
-                "type": "支出",
-                "category": "食費",
-                "content": "サンプル：昼食代",
-                "amount": 1200,
-                "transaction_type": "消費 (Need)"
-            },
-            {
-                "user_id": user_uuid,
-                "date": datetime.date.today().strftime("%Y-%m-%d"),
-                "type": "収入",
-                "category": "主収入（給与・事業）",
-                "content": "サンプル：給与",
-                "amount": 250000,
-                "transaction_type": "投資 (Invest)"
-            }
-        ]
-        sample_assets = [
-            {
-                "user_id": user_uuid,
-                "date": datetime.date.today().strftime("%Y-%m-%d"),
-                "type": "流動資産 (現金・預金)",
-                "name": "メイン銀行",
-                "amount": 1000000
-            }
-        ]
-        try:
-            if supabase:
-                robust_supabase_insert("transactions", sample_txs)
-                robust_supabase_insert("assets", sample_assets)
-                st.toast("👋 ようこそ！操作イメージ用のサンプルデータを投入しました。")
-        except Exception as e:
-            st.error(f"サンプルデータの投入に失敗しました: {e}")
-    
-    @st.cache_data(ttl=60)
-    def load_data(user_id: str):
-        user_uuid = get_user_uuid(user_id)
-        if supabase is not None:
-            try:
-                response = supabase.table("transactions").select("*").eq("user_id", user_uuid).order("date", desc=True).execute()
-                df = pd.DataFrame(response.data)
-                if not df.empty:
-                    df = df.rename(columns=DB_MAP_TX_FROM_DB)
-                    df["日付"] = pd.to_datetime(df["日付"]).dt.date
-                    if "性質" not in df.columns:
-                        df["性質"] = "消費 (Need)"  # カラムがない場合の自動補完
-                    return df
-                else:
-                    # 初回ログイン時に0件ならサンプル投入し、再度読み込む
-                    insert_sample_data(user_id)
-                    response = supabase.table("transactions").select("*").eq("user_id", user_uuid).order("date", desc=True).execute()
-                    df = pd.DataFrame(response.data)
-                    if not df.empty:
-                        df = df.rename(columns=DB_MAP_TX_FROM_DB)
-                        df["日付"] = pd.to_datetime(df["日付"]).dt.date
-                        if "性質" not in df.columns:
-                            df["性質"] = "消費 (Need)"
-                    return df
-            except Exception as e:
-                st.warning(f"Supabase読込エラー(Transactions): {e}")
-                
-        return pd.DataFrame(columns=["user_id", "日付", "タイプ", "カテゴリー", "内容", "金額", "性質"])
-    
-    def save_data(df, user_id: str):
-        if supabase is None:
-            st.error("Supabaseクライアントが初期化されていません。")
-            return
-    
-        df = df.copy()
-        user_uuid = get_user_uuid(user_id)
-        df["user_id"] = user_uuid
-        
-        try:
-            df["金額"] = df["金額"].astype(int)
-            df["日付"] = pd.to_datetime(df["日付"]).dt.strftime("%Y-%m-%d")
-            df = df.rename(columns=DB_MAP_TX_TO_DB)
-            if "id" in df.columns:
-                df = df.drop(columns=["id"])
-        except Exception as e:
-            st.error(f"データ変換エラー: {e}")
-            return
-    
-        try:
-            supabase.table("transactions").delete().eq("user_id", user_uuid).execute()
-            records = df.to_dict(orient="records")
-            if records:
-                robust_supabase_insert("transactions", records)
-            st.session_state.is_synced = True
-            # キャッシュクリア
-            load_data.clear()
-        except Exception as e:
-            st.error(f"データ保存エラー: {e}")
-    
-    # --- バランスシート（BS）データの定義 ---
-    ASSETS_FILENAME = "assets_data_v2.csv"
-    
-    @st.cache_data(ttl=300)
-    def load_assets_data(user_id: str):
-        user_uuid = get_user_uuid(user_id)
-        if supabase is not None:
-            try:
-                response = supabase.table("assets").select("*").eq("user_id", user_uuid).execute()
-                df = pd.DataFrame(response.data)
-                if not df.empty:
-                    df = df.rename(columns=DB_MAP_ASSET_FROM_DB)
-                    df["日付"] = pd.to_datetime(df["日付"]).dt.date
-                    return df
-            except Exception as e:
-                st.warning(f"Supabase(BS)読込エラー: {e}")
-                
-        return pd.DataFrame(columns=["user_id", "日付", "区分", "項目名", "金額"])
-    
-    def save_assets_data(df, user_id: str):
-        if supabase is None:
-            st.error("Supabaseクライアントが初期化されていません。")
-            return
-    
-        df = df.copy()
-        user_uuid = get_user_uuid(user_id)
-        df["user_id"] = user_uuid
-        
-        try:
-            df["金額"] = df["金額"].astype(int)
-            df["日付"] = pd.to_datetime(df["日付"]).dt.strftime("%Y-%m-%d")
-            df = df.rename(columns=DB_MAP_ASSET_TO_DB)
-            if "id" in df.columns:
-                df = df.drop(columns=["id"])
-        except Exception as e:
-            st.error(f"BSデータ変換エラー: {e}")
-            return
-    
-        try:
-            supabase.table("assets").delete().eq("user_id", user_uuid).execute()
-            records = df.to_dict(orient="records")
-            if records:
-                robust_supabase_insert("assets", records)
-            # キャッシュクリア
-            load_assets_data.clear()
-        except Exception as e:
-            st.error(f"Supabase(BS)保存エラー: {e}")
+    # Supabase関連関数はグローバルに移動されました
 
     def update_bs_from_transactions(new_tx_list, user_id):
         """
@@ -1321,11 +1362,17 @@ def main_app_logic(user_id):
     
     # --- 固定費テンプレート ---
     FIXED_COST_TEMPLATE = [
-        {"カテゴリー": "住居費",   "内容": "毎月の家賃",       "金額": 80000},
-        {"カテゴリー": "通信費", "内容": "スマホ・ネット代", "金額": 10000},
-        {"カテゴリー": "保険料", "内容": "生命保険・損保",   "金額": 15000},
-        {"カテゴリー": "水道光熱費", "内容": "電気・ガス・水道", "金額": 12000},
-        {"カテゴリー": "サブスクリプション", "内容": "動画・音楽等", "金額": 2000},
+        {"カテゴリー": "住居費",   "内容": "家賃・住宅ローン",   "金額": 80000},
+        {"カテゴリー": "光熱費", "内容": "電気代",             "金額": 8000},
+        {"カテゴリー": "光熱費", "内容": "ガス代",             "金額": 4000},
+        {"カテゴリー": "光熱費", "内容": "水道代",             "金額": 3000},
+        {"カテゴリー": "通信費", "内容": "スマホ代",           "金額": 5000},
+        {"カテゴリー": "通信費", "内容": "インターネット回線", "金額": 5000},
+        {"カテゴリー": "医療・保険", "内容": "生命保険",       "金額": 10000},
+        {"カテゴリー": "医療・保険", "内容": "医療保険・損保",   "金額": 5000},
+        {"カテゴリー": "娯楽",   "内容": "サブスク (動画・音楽等)", "金額": 2000},
+        {"カテゴリー": "その他", "内容": "教育費・習い事",     "金額": 10000},
+        {"カテゴリー": "交通費", "内容": "駐車場代・定期代",   "金額": 5000},
     ]
     
     
@@ -1563,15 +1610,25 @@ def main_app_logic(user_id):
         st.warning("👋 **Welcome!** まだデータがありません。「⚙️ データ管理」タブからCSVインポートをして、あなた専用の財務分析を開始しましょう！")
     
 
-    tab_input, tab_dash, tab_bs, tab_settings = st.tabs(["📝 入力・履歴", "📊 ダッシュボード", "🏦 純資産(BS)", "⚙️ 設定"])
+    tab_input, tab_dash, tab_bs, tab_settings = st.tabs([
+        "✏️ 記録する", 
+        "📊 分析・レポート", 
+        "🏦 資産のすがた", 
+        "⚙️ アプリ設定"
+    ])
     
     # 既存のタブ変数名にマッピングして内部コードを維持
     tab4 = tab_input
-    tab1 = tab_dash
-    tab_ai = tab_dash
-    tab_bs = tab_bs
-    tab2 = tab_dash
-    tab3 = tab_dash
+    
+    with tab_dash:
+        # ダッシュボードの中身をさらにサブタブに分割して情報過密を防ぐ
+        tab1, tab2, tab3, tab_ai = st.tabs([
+            "📈 今月のまとめ", 
+            "📊 くらべる", 
+            "🔮 未来を見る", 
+            "🤖 AIアドバイス"
+        ])
+
 
     # --- タブ自動切り替えロジック ---
     if st.session_state.switch_to_tab is not None:
@@ -2704,9 +2761,22 @@ def main_app_logic(user_id):
                 justify-content: space-between;
                 align-items: center;
                 border-left: 5px solid #007AFF;
+                cursor: pointer;
             }}
             .detail-card.expense {{ border-left-color: #FF3B30; }}
             
+            /* 【Phase 2】ボタンとエディタのモバイル最適化 */
+            .stButton > button {{
+                height: 3.2em !important;
+                border-radius: 12px !important;
+                font-weight: 600 !important;
+            }}
+            [data-testid="stDataEditor"] {{
+                border: 1.5px solid #f0f2f6 !important;
+                border-radius: 12px !important;
+                overflow: hidden;
+            }}
+
             /* スマホで横並びのフォーム要素を縦にするためのメディアクエリ（テーブル以外） */
             @media (max-width: 768px) {{
                 .stHorizontalBlock:not(:has(.n-cal)) {{ flex-direction: column !important; }}
@@ -2753,7 +2823,6 @@ def main_app_logic(user_id):
             # 選択された日の詳細
             day_events = m_df[m_df["日付"] == s_date]
         # --- 3. 【UI】絶対崩れない「埋め込み型」カレンダー ---
-        import streamlit.components.v1 as components
         st.markdown("### 🗓️ 収支状況カレンダー")
         
         month_cal = calendar.monthcalendar(v_date.year, v_date.month)
@@ -2792,8 +2861,13 @@ def main_app_logic(user_id):
                     is_selected = (day == s_date.day and v_date.month == s_date.month and v_date.year == s_date.year)
                     is_today = (day == today.day and v_date.month == today.month and v_date.year == today.year)
                     
-                    # クラス設定
+                    # クラス設定とクリックイベント (Phase 2)
                     day_cls = "n-day-box"
+                    click_js = ""
+                    if day > 0:
+                        day_str = f"{v_date.year}-{v_date.month:02d}-{day:02d}"
+                        click_js = f"onclick=\"window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + '?date={day_str}'\" style='cursor:pointer;'"
+                    
                     if is_selected: day_cls += " n-selected"
                     elif is_today: day_cls += " n-today"
                     
@@ -2804,7 +2878,7 @@ def main_app_logic(user_id):
                     dots_html += '</div>'
 
                     html_body += f"""
-                    <td>
+                    <td {click_js}>
                         <div class="{day_cls}">{day}</div>
                         {dots_html}
                     </td>
@@ -2816,7 +2890,7 @@ def main_app_logic(user_id):
         h_val = 300 if len(month_cal) <= 4 else (350 if len(month_cal) <= 5 else 400)
         components.html(html_body, height=h_val, scrolling=False)
         
-        st.markdown('<p style="font-size:12px; color:#8e8e93; margin-top:-10px;">※ 日付の変更は下の「記録フォーム」より行ってください。</p>', unsafe_allow_html=True)
+        st.markdown('<p style="font-size:12px; color:#8e8e93; margin-top:-10px;">※ 日付をクリックすると詳細を表示します。（URLが更新されます）</p>', unsafe_allow_html=True)
 
         st.markdown("---")
 
@@ -2845,13 +2919,38 @@ def main_app_logic(user_id):
 
         with f_col2:
             st.markdown("#### ✍️ 収支を記録")
-            # st.form は使用せず、即時連携
+            
+            # --- 下書きオートセーブ: session_stateに入力中の値を常に保持 ---
+            # リロードしてもSupabaseから復元できるよう、下書きをDBへも保存
+            if 'draft_input' not in st.session_state:
+                # Supabaseに保存された下書きがあれば復元
+                draft_loaded = False
+                if supabase:
+                    try:
+                        user_uuid = get_user_uuid(st.session_state.username)
+                        resp = supabase.table("input_drafts").select("*").eq("user_id", user_uuid).execute()
+                        if resp.data:
+                            d = resp.data[0]
+                            st.session_state.draft_input = {
+                                'amount': d.get('amount', 0),
+                                'memo': d.get('memo', ''),
+                                'type': d.get('type', '支出'),
+                            }
+                            draft_loaded = True
+                    except Exception:
+                        pass  # テーブルが存在しない場合は無視
+                if not draft_loaded:
+                    st.session_state.draft_input = {'amount': 0, 'memo': '', 'type': '支出'}
+            
+            draft = st.session_state.draft_input
+            
             i_date = st.date_input("日付", value=s_date, key="qi_date")
             if i_date != s_date:
                 st.session_state.selected_date = i_date
                 st.rerun()
                 
-            i_type = st.radio("タイプ", ["支出", "収入"], horizontal=True, label_visibility="collapsed")
+            i_type = st.radio("タイプ", ["支出", "収入"], horizontal=True, label_visibility="collapsed",
+                              index=0 if draft.get('type', '支出') == '支出' else 1)
             
             # カテゴリ・性質の切替
             if i_type == "支出":
@@ -2865,8 +2964,27 @@ def main_app_logic(user_id):
             i_cat = cat_c.selectbox("カテゴリ", i_cats, key="sel_cat")
             i_tag = tag_c.selectbox("性質", i_tags, key="sel_tag")
             
-            i_amt = st.number_input("金額 (円)", min_value=0, step=1000, key="num_amt")
-            i_memo = st.text_input("内容・メモ (任意)", key="txt_memo")
+            i_amt = st.number_input("金額 (円)", min_value=0, step=1000, key="num_amt",
+                                    value=draft.get('amount', 0))
+            i_memo = st.text_input("内容・メモ (任意)", key="txt_memo",
+                                   value=draft.get('memo', ''))
+            
+            # --- 入力値が変わったら下書きを自動保存 ---
+            current_draft = {'amount': i_amt, 'memo': i_memo, 'type': i_type}
+            if current_draft != draft:
+                st.session_state.draft_input = current_draft
+                # Supabaseにも下書きを保存（テーブルが存在する場合のみ）
+                if supabase:
+                    try:
+                        user_uuid = get_user_uuid(st.session_state.username)
+                        supabase.table("input_drafts").upsert({
+                            "user_id": user_uuid,
+                            "amount": i_amt,
+                            "memo": i_memo,
+                            "type": i_type
+                        }).execute()
+                    except Exception:
+                        pass  # テーブルが無くてもアプリは止めない
             
             if st.button("🚀 登録", use_container_width=True, type="primary", key="btn_reg"):
                 if i_amt > 0:
@@ -2880,8 +2998,25 @@ def main_app_logic(user_id):
                         "性質": i_tag
                     }
                     st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame([new_rec])], ignore_index=True)
-                    save_data(st.session_state.df, st.session_state.username)
+                    # 直近の選択を保存
+                    if i_type == "支出":
+                        st.session_state.last_expense_cat = i_cat
+                        st.session_state.last_expense_tag = i_tag
+                    else:
+                        st.session_state.last_income_cat = i_cat
+                    
+                    save_to_supabase(st.session_state.df, st.session_state.username)
                     update_bs_from_transactions([new_rec], st.session_state.username)
+                    
+                    # 登録完了後、下書きをクリア
+                    st.session_state.draft_input = {'amount': 0, 'memo': '', 'type': '支出'}
+                    if supabase:
+                        try:
+                            user_uuid = get_user_uuid(st.session_state.username)
+                            supabase.table("input_drafts").delete().eq("user_id", user_uuid).execute()
+                        except Exception:
+                            pass
+                    
                     st.toast("✅ 登録しました！")
                     st.rerun()
                 else:
@@ -2914,7 +3049,7 @@ def main_app_logic(user_id):
                 },
                 key="editor_integrated"
             )
-            manage_data_ui(e_df, st.session_state.df, "df", "df_backup", save_data, ["日付", "カテゴリー", "金額"])
+            manage_data_ui(e_df, st.session_state.df, "df", "df_backup", save_to_supabase, ["日付", "カテゴリー", "金額"])
 
         def apply_smart_labeling(import_df, history_df):
             """過去の入力履歴（内容とカテゴリーの対応）を元に、CSVインポートデータのカテゴリーを自動推測する"""
@@ -2975,19 +3110,47 @@ def main_app_logic(user_id):
                             mapped["タイプ"] = csv_df[i_type_c].apply(lambda x: "収入" if "入" in str(x) or "収" in str(x) else "支出") if i_type_c != "(未指定)" else "支出"
                             mapped["カテゴリー"] = "未分類"
                             mapped["性質"] = mapped.apply(lambda r: "収入" if r["タイプ"] == "収入" else "消費 (Need)", axis=1)
+                            
+                            # 【Phase 2】重複チェックロジック
+                            def check_dup(r):
+                                if st.session_state.df.empty: return "新規"
+                                is_dup = st.session_state.df[
+                                    (st.session_state.df["日付"] == r["日付"]) & 
+                                    (st.session_state.df["金額"] == r["金額"]) & 
+                                    (st.session_state.df["内容"] == r["内容"])
+                                ]
+                                return "⚠️ 重複疑い" if not is_dup.empty else "新規"
+                            
+                            mapped.insert(0, "状態", mapped.apply(check_dup, axis=1))
                             st.session_state.import_preview_df = apply_smart_labeling(mapped, st.session_state.df).dropna(subset=["日付"])
                 
                     if "import_preview_df" in st.session_state:
                         st.markdown("##### プレビューの修正と確定")
+                        
+                        skip_duplicates = st.checkbox("✅ 「⚠️ 重複疑い」の行を自動的にスキップしてインポートする", value=True)
+                        
                         edited_p = st.data_editor(st.session_state.import_preview_df, use_container_width=True, key="imp_edit")
                         if st.button("📥 インポート確定", use_container_width=True, type="primary"):
-                            st.session_state.df = pd.concat([st.session_state.df, edited_p], ignore_index=True)
-                            save_data(st.session_state.df, st.session_state.username)
-                            update_bs_from_transactions(edited_p.to_dict("records"), st.session_state.username)
-                            st.success("インポート完了！")
+                            final_import = edited_p.copy()
+                            if skip_duplicates and "状態" in final_import.columns:
+                                final_import = final_import[final_import["状態"] != "⚠️ 重複疑い"]
+                            
+                            # ゴミデータ削除
+                            if "状態" in final_import.columns:
+                                final_import = final_import.drop(columns=["状態"])
+                                
+                            if not final_import.empty:
+                                st.session_state.df = pd.concat([st.session_state.df, final_import], ignore_index=True)
+                                save_to_supabase(st.session_state.df, st.session_state.username)
+                                update_bs_from_transactions(final_import.to_dict("records"), st.session_state.username)
+                                st.success(f"{len(final_import)} 件のインポートが完了しました！")
+                            else:
+                                st.warning("インポートするデータがありませんでした（すべてスキップされました）。")
+                                
                             del st.session_state.import_preview_df
                             st.rerun()
-                except Exception as e: st.error(f"エラー: {e}")
+                except Exception as e: 
+                    st.error(f"🚨 プレビュー処理エラー: CSVファイルの形式や文字コードを確認してください。詳細: {e}")
 
 
     with tab_settings:
