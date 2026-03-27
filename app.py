@@ -37,9 +37,9 @@ if 'business_type' not in st.session_state:
 if 'authentication_status' not in st.session_state:
     st.session_state.authentication_status = None
 if 'df' not in st.session_state:
-    st.session_state.df = pd.DataFrame()
+    st.session_state.df = None  # None = 「DBから未取得」のマーカー。main_app_logic冒頭で自動取得する
 if 'assets_df' not in st.session_state:
-    st.session_state.assets_df = pd.DataFrame()
+    st.session_state.assets_df = None
 if 'import_preview_df' not in st.session_state:
     st.session_state.import_preview_df = pd.DataFrame()
 if 'name' not in st.session_state:
@@ -59,7 +59,14 @@ if 'sim_params' not in st.session_state:
         'use_tax': False
     }
 if 'selected_date' not in st.session_state:
-    st.session_state.selected_date = datetime.date.today()
+    # URLパラメータがあればそれを優先、なければ今日
+    if "date" in st.query_params:
+        try:
+            st.session_state.selected_date = datetime.date.fromisoformat(st.query_params["date"])
+        except Exception:
+            st.session_state.selected_date = datetime.date.today()
+    else:
+        st.session_state.selected_date = datetime.date.today()
 if 'qi_date_input' not in st.session_state:
     st.session_state.qi_date_input = datetime.date.today()
 if 'target_date' not in st.session_state:
@@ -69,6 +76,8 @@ if 'target_date' not in st.session_state:
 DEFAULT_EXPENSE_CATEGORIES = ["食費", "日用品", "住居費", "光熱費", "通信費", "交通費", "娯楽", "美容・衣服", "医療・保険", "その他"]
 if 'expense_categories' not in st.session_state:
     st.session_state.expense_categories = DEFAULT_EXPENSE_CATEGORIES
+if 'start_weekday' not in st.session_state:
+    st.session_state.start_weekday = '月曜日'
 
 def render_category_management():
     st.subheader("📁 支出カテゴリーの編集")
@@ -483,6 +492,28 @@ def robust_supabase_upsert(table_name, data_list):
                 raise e
     raise Exception("テーブル定義の自動調整に失敗しました。")
 
+def robust_supabase_insert(table_name, data_list):
+    """
+    新規データ専用のINSERT関数。upsertと違い、既存データを上書きしない。
+    カラム不一致時は自動除去して再試行する。
+    """
+    if not data_list or not supabase: return
+    current_data = [d.copy() for d in data_list]
+    for _ in range(5):
+        try:
+            supabase.table(table_name).insert(current_data).execute()
+            return
+        except Exception as e:
+            error_msg = str(e)
+            match = re.search(r"Could not find the '([^']+)' column", error_msg)
+            if match:
+                missing_col = match.group(1)
+                for item in current_data:
+                    item.pop(missing_col, None)
+            else:
+                raise e
+    raise Exception("テーブル定義の自動調整に失敗しました。")
+
 def insert_sample_data(user_id: str):
     """新規ユーザー向けのサンプルデータ投入"""
     user_uuid = get_user_uuid(user_id)
@@ -538,21 +569,15 @@ def load_data(user_id: str):
                 if "性質" not in df.columns:
                     df["性質"] = "消費 (Need)"
                 return df
-            else:
-                insert_sample_data(user_id)
-                response = supabase.table("transactions").select("*").eq("user_id", user_uuid).order("date", desc=True).execute()
-                df = pd.DataFrame(response.data)
-                if not df.empty:
-                    df = df.rename(columns=DB_MAP_TX_FROM_DB)
-                    df["日付"] = pd.to_datetime(df["日付"]).dt.date
-                return df
+            # DBが空の場合はそのまま空のDFを返す（サンプルデータの自動投入は行わない）
         except Exception as e:
             st.warning(f"⚠️ Supabaseデータ読込エラー (Transactions): ネットワーク接続やテーブル定義を確認してください。詳細: {e}")
     return pd.DataFrame(columns=["user_id", "日付", "タイプ", "カテゴリー", "内容", "金額", "性質"])
 
 def save_to_supabase(df, user_id: str):
     """
-    データをSupabaseへ保存(upsert)する。各行にusernameを付与し、既存IDがあれば更新。
+    新規データをSupabaseへ保存(INSERT)する。
+    upsertではなくinsertを使用し、IDなしレコードの重複生成を防止する。
     """
     if supabase is None or df is None:
         return
@@ -560,7 +585,7 @@ def save_to_supabase(df, user_id: str):
     df = df.copy()
     user_uuid = get_user_uuid(user_id)
     df["user_id"] = user_uuid
-    df["username"] = user_id # ユーザーの要望: 各行にusernameを付与
+    df["username"] = user_id
 
     try:
         # 型変換と整形
@@ -573,14 +598,16 @@ def save_to_supabase(df, user_id: str):
         # DBカラム名へ変換
         df = df.rename(columns=DB_MAP_TX_TO_DB)
         
-        # 保存(upsert)実行
+        # DB側で自動生成されるカラムを除去（id, created_at 等）
+        for col in ["id", "created_at", "updated_at"]:
+            if col in df.columns:
+                df = df.drop(columns=[col])
+        
+        # 保存(INSERT)実行（新規データのみ。既存データの上書きはしない）
         records = df.to_dict(orient="records")
         if records:
-            robust_supabase_upsert("transactions", records)
-        
+            robust_supabase_insert("transactions", records)
         st.session_state.is_synced = True
-        # キャッシュをクリアして最新を反映
-        load_data.clear()
     except Exception as e:
         st.error(f"⚠️ Supabaseデータ保存エラー: ネットワーク接続やデータ形式を確認してください。詳細: {e}")
         st.session_state.is_synced = False
@@ -712,13 +739,101 @@ if "sim_params" not in st.session_state:
 # --- 5. サイドバー ---
 
 
+def update_bs_from_transactions(new_tx_list, user_id):
+    """
+    新規取引(PL)データリストに基づいて、BS(流動資産)の代表口座の残高を自動更新する。
+    new_tx_list: [{'タイプ': '支出', '金額': 1000}, ...] 形式のリスト
+    """
+    if not new_tx_list: return
+    df_assets = st.session_state.get("assets_df", pd.DataFrame())
+    if df_assets.empty: return
+
+    # 代表口座（現金・預金の最初の行）をターゲットにする
+    target_indices = df_assets[df_assets["区分"] == "流動資産 (現金・預金)"].index
+    if len(target_indices) == 0: return
+    
+    target_idx = target_indices[0]
+    net_change = 0
+    
+    for tx in new_tx_list:
+        try:
+            amt = int(tx.get("金額", 0))
+            # 空文字などの例外を回避
+        except (ValueError, TypeError):
+            amt = 0
+            
+        if tx.get("タイプ") == "収入":
+            net_change += amt
+        elif tx.get("タイプ") == "支出":
+            net_change -= amt
+            
+    if net_change != 0:
+        df_assets.at[target_idx, "金額"] += net_change
+        st.session_state.assets_df = df_assets
+        save_assets_data(df_assets, user_id)
+        st.toast(f"🔄 BSの口座残高も連動して更新されました ({net_change:+,}円)")
+
+
+def finalize_registration(new_rows, success_msg):
+    """
+    高速登録関数（楽観的更新パターン）。
+    DBにINSERT後、ローカルdfに即時追加してrerunするだけ。
+    DBからの再読み込みをスキップするため待機時間が極小。
+    """
+    if not new_rows:
+        return
+
+    try:
+        # A. 新しいデータをDataFrame化
+        new_df = pd.DataFrame(new_rows) if isinstance(new_rows, list) else new_rows
+
+        # B. データベースへ保存（追加分のみINSERT）
+        save_to_supabase(new_df, st.session_state["username"])
+
+        # C. 資産（BS）更新
+        rows_to_update = new_rows if isinstance(new_rows, list) else new_rows.to_dict('records')
+        update_bs_from_transactions(rows_to_update, st.session_state["username"])
+
+        # D. 【高速化】ローカルdfに即時追加（DB再読み込み不要 = spinnerなし）
+        if st.session_state.get("df") is not None and isinstance(st.session_state.df, pd.DataFrame):
+            st.session_state.df = pd.concat([st.session_state.df, new_df], ignore_index=True)
+        else:
+            st.session_state.df = new_df
+
+        # E. キャッシュはクリア（次回のフルリロード時に最新を取得するため）
+        load_data.clear()
+
+        # F. 完了通知と画面リフレッシュ
+        st.toast(success_msg)
+        st.rerun()
+
+    except Exception as e:
+        st.error(f"登録に失敗しました: {e}")
+
 def main_app_logic(user_id):
+    # 1. URLパラメータの監視とStateへの強制同期（最優先）
+    if "date" in st.query_params:
+        try:
+            url_date = datetime.date.fromisoformat(st.query_params["date"])
+            if st.session_state.get("selected_date") != url_date:
+                st.session_state.selected_date = url_date
+                # カレンダーの表示月（view_date）も選択月の1日に同期させる
+                st.session_state.view_date = url_date.replace(day=1)
+                st.rerun() # ここで強制的に再描画を走らせる
+        except Exception:
+            pass
+
     # 共通変数の初期化
     current_net_worth = 0
-    if 'df' not in st.session_state:
-        st.session_state.df = load_data(user_id)
-    if 'assets_df' not in st.session_state:
-        st.session_state.assets_df = load_assets_data(user_id)
+
+    # 【ステップ3】データがメモリにない、またはfinalize_registrationでNoneにされた直後の場合、
+    # DBから最新の全データを自動復元する（Single Source of Truth の肝）
+    if st.session_state.get("df") is None or not isinstance(st.session_state.get("df"), pd.DataFrame):
+        with st.spinner("最新データを同期中..."):
+            st.session_state.df = load_data(user_id)
+    if st.session_state.get("assets_df") is None or not isinstance(st.session_state.get("assets_df"), pd.DataFrame):
+        with st.spinner("資産データを同期中..."):
+            st.session_state.assets_df = load_assets_data(user_id)
     
     # 日付連動用のプレースホルダー変数（StreamlitAPIException回避用）
     if 'target_date' not in st.session_state:
@@ -759,16 +874,6 @@ def main_app_logic(user_id):
         help="収入－支出で毎月この額を黒字にする目標です"
     )
     
-    # --- 5.2 URLパラメータからの日付同期 (Phase 2) ---
-    if "date" in st.query_params:
-        try:
-            param_date = datetime.date.fromisoformat(st.query_params["date"])
-            if param_date != st.session_state.selected_date:
-                st.session_state.selected_date = param_date
-                # st.rerun() は query_params 変更時に自動で走るため、明示的な rerun は不要
-        except:
-            pass
-
     st.sidebar.markdown("---")
 
     
@@ -878,41 +983,6 @@ def main_app_logic(user_id):
     
     
     # Supabase関連関数はグローバルに移動されました
-
-    def update_bs_from_transactions(new_tx_list, user_id):
-        """
-        新規取引(PL)データリストに基づいて、BS(流動資産)の代表口座の残高を自動更新する。
-        new_tx_list: [{'タイプ': '支出', '金額': 1000}, ...] 形式のリスト
-        """
-        if not new_tx_list: return
-        df_assets = st.session_state.get("assets_df", pd.DataFrame())
-        if df_assets.empty: return
-
-        # 代表口座（現金・預金の最初の行）をターゲットにする
-        target_indices = df_assets[df_assets["区分"] == "流動資産 (現金・預金)"].index
-        if len(target_indices) == 0: return
-        
-        target_idx = target_indices[0]
-        net_change = 0
-        
-        for tx in new_tx_list:
-            try:
-                amt = int(tx.get("金額", 0))
-                # 空文字などの例外を回避
-            except (ValueError, TypeError):
-                amt = 0
-                
-            if tx.get("タイプ") == "収入":
-                net_change += amt
-            elif tx.get("タイプ") == "支出":
-                net_change -= amt
-                
-        if net_change != 0:
-            df_assets.at[target_idx, "金額"] += net_change
-            st.session_state.assets_df = df_assets
-            save_assets_data(df_assets, user_id)
-            st.toast(f"🔄 BSの口座残高も連動して更新されました ({net_change:+,}円)")
-    
     # グローバルでの呼び出しを削除し、main() 内で行うように変更
     
     ASSET_TYPES = ["流動資産 (現金・預金)", "固定資産 (投資信託・証券)", "固定資産 (不動産・その他)", "流動負債 (クレカ等)", "固定負債 (ローン)"]
@@ -929,6 +999,24 @@ def main_app_logic(user_id):
         "運用益": ["資産運用益"],
         "特別利益": ["特別利益"],
     }
+    # UI表示用（絵文字追加）マッピング
+    UI_TYPE_MAP = {"支出": "🔴 支出", "収入": "🔵 収入"}
+    UI_TYPE_REV = {v: k for k, v in UI_TYPE_MAP.items()}
+    
+    UI_CAT_MAP = {
+        "食費": "🍱 食費", "日用品": "🧻 日用品", "住居費": "🏠 住居費",
+        "水道光熱費": "💡 水道光熱費", "光熱費": "💡 光熱費", "通信費": "📱 通信費",
+        "交通費": "🚂 交通費", "娯楽・レジャー": "🎉 娯楽・レジャー", "娯楽": "🎉 娯楽",
+        "美容・健康": "💇 美容・健康", "美容・衣服": "💇 美容・衣服", "保険料": "🛡️ 保険料",
+        "医療・保険": "🏥 医療・保険", "サブスクリプション": "📺 サブスクリプション",
+        "その他": "📦 その他", "投資（NISA/iDeCo等）": "📈 投資（NISA/iDeCo等）",
+        "主収入（給与・事業）": "💼 主収入（給与・事業）", "副次収入": "💰 副次収入",
+        "資産運用益": "💹 資産運用益", "特別利益": "🎁 特別利益"
+    }
+    UI_CAT_REV = {v: k for k, v in UI_CAT_MAP.items()}
+
+    # === [UIマッピング終了] ===
+
     # フラットリスト（UI選択肢用）
     EXPENSE_CATEGORIES = st.session_state.expense_categories
     INCOME_CATEGORIES = [c for cats in INCOME_MASTER.values() for c in cats]
@@ -1377,31 +1465,41 @@ def main_app_logic(user_id):
     
     
     def register_fixed_costs(df, template, user_id, target_date=None):
-        """固定費を一括登録する。重複がある場合はスキップし、結果メッセージを返す。"""
+        """固定費を一括登録する。同一月の固定費テンプレート分を先に削除してから再挿入する（冪等性の保証）。"""
         if target_date is None:
             target_date = datetime.date.today()
         first_of_month = target_date.replace(day=1)
         
-        added = []
-        skipped = []
+        # --- 同一月の既存固定費（テンプレートに含まれる内容）を削除 ---
+        template_contents = [(item["カテゴリー"], item["内容"]) for item in template if item["金額"] > 0]
         
+        if not df.empty:
+            df_dates = pd.to_datetime(df["日付"]).dt.date
+            # テンプレートの各項目に一致する同月レコードを特定
+            delete_mask = pd.Series([False] * len(df), index=df.index)
+            for cat, content in template_contents:
+                item_mask = (
+                    df_dates.apply(lambda x: x.year == first_of_month.year and x.month == first_of_month.month) &
+                    (df["カテゴリー"] == cat) &
+                    (df["内容"] == content) &
+                    (df["タイプ"] == "支出")
+                )
+                delete_mask = delete_mask | item_mask
+            
+            deleted_count = delete_mask.sum()
+            if deleted_count > 0:
+                # セッション上のdfから削除
+                df = df[~delete_mask].reset_index(drop=True)
+                st.session_state.df = df
+                
+                # Supabaseからも同期的に保存（既存データを上書き）
+                save_to_supabase(df, user_id)
+        
+        # --- テンプレートの全項目を新規挿入 ---
+        added = []
         for item in template:
             if item["金額"] <= 0:
                 continue
-            
-            # 重複チェック: 同月・同カテゴリー・同内容が既にあればスキップ
-            if not df.empty:
-                df_dates = pd.to_datetime(df["日付"]).dt.date
-                same_month = df[
-                    (df_dates.apply(lambda x: x.year == first_of_month.year and x.month == first_of_month.month)) &
-                    (df["カテゴリー"] == item["カテゴリー"]) &
-                    (df["内容"] == item["内容"]) &
-                    (df["タイプ"] == "支出")
-                ]
-                if not same_month.empty:
-                    skipped.append(f"{item['カテゴリー']}（{item['内容']}）")
-                    continue
-            
             added.append({
                 "user_id": user_id,
                 "日付": first_of_month,
@@ -1412,7 +1510,7 @@ def main_app_logic(user_id):
                 "性質": "消費 (Need)"
             })
         
-        return added, skipped
+        return added, []
     
     
     # --- 共通のデータ管理UI (DRY原則適用) ---
@@ -2745,8 +2843,8 @@ def main_app_logic(user_id):
             .n-today {{ border: 1.5px solid #1d1d1f; border-radius: 50%; }}
             
             /* ドットコンテナ */
-            .n-dots {{ display: flex; justify-content: center; gap: 3px; margin-top: 2px; height: 5px; }}
-            .n-dot {{ width: 5px; height: 5px; border-radius: 50%; }}
+            .n-dots {{ display: flex; justify-content: center; align-items: center; gap: 3px; margin-top: 2px; flex-wrap: wrap; padding: 0 2px; }}
+            .n-dot {{ width: 7px; height: 7px; border-radius: 50%; margin: 1px 0; }}
             .n-red {{ background-color: #FF3B30; }} /* 支出 */
             .n-blue {{ background-color: #007AFF; }} /* 収入 */
 
@@ -2804,7 +2902,7 @@ def main_app_logic(user_id):
                 st.rerun()
 
         # KeyError防止とデータ抽出
-        spent_days, income_days = set(), set()
+        spent_counts, income_counts = {}, {}
         day_events = pd.DataFrame()
         
         if "df" in st.session_state and not st.session_state.df.empty and "日付" in st.session_state.df.columns:
@@ -2816,23 +2914,35 @@ def main_app_logic(user_id):
             m_mask = (df_active["日付"].apply(lambda x: x.year == v_date.year and x.month == v_date.month))
             m_df = df_active[m_mask]
             
-            # ドット判定用の日別セット
-            spent_days = set(m_df[m_df["タイプ"] == "支出"]["日付"].apply(lambda x: x.day))
-            income_days = set(m_df[m_df["タイプ"] == "収入"]["日付"].apply(lambda x: x.day))
+            # ドット表示用の日別カウント
+            spent_counts = m_df[m_df["タイプ"] == "支出"]["日付"].apply(lambda x: x.day).value_counts().to_dict()
+            income_counts = m_df[m_df["タイプ"] == "収入"]["日付"].apply(lambda x: x.day).value_counts().to_dict()
             
             # 選択された日の詳細
             day_events = m_df[m_df["日付"] == s_date]
         # --- 3. 【UI】絶対崩れない「埋め込み型」カレンダー ---
         st.markdown("### 🗓️ 収支状況カレンダー")
         
-        month_cal = calendar.monthcalendar(v_date.year, v_date.month)
+        # 開始曜日の設定
+        first_weekday = 0 if st.session_state.get('start_weekday', '月曜日') == '月曜日' else 6
+        cal = calendar.Calendar(firstweekday=first_weekday)
+        month_cal = cal.monthdayscalendar(v_date.year, v_date.month)
         today = datetime.date.today()
+        
+        # 曜日ヘッダーと土日のインデックス設定
+        if first_weekday == 0:
+            headers = ["月", "火", "水", "木", "金", "土", "日"]
+            sat_idx, sun_idx = 6, 7
+        else:
+            headers = ["日", "月", "火", "水", "木", "金", "土"]
+            sat_idx, sun_idx = 7, 1
+        header_html = "".join([f"<th>{h}</th>" for h in headers])
         
         # Iframe内用のHTML/CSS構築
         html_body = f"""
         <style>
-            body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background-color: transparent; }}
-            .n-cal {{ width: 100%; border-collapse: collapse; table-layout: fixed; }}
+            body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background-color: transparent; pointer-events: none; user-select: none; }}
+            .n-cal {{ width: 100%; border-collapse: collapse; table-layout: fixed; pointer-events: none; }}
             .n-cal th {{ text-align: center; font-size: 11px; color: #8e8e93; padding: 8px 0; font-weight: bold; text-transform: uppercase; }}
             .n-cal td {{ border: 0.5px solid #f2f2f7; text-align: center; height: 50px; position: relative; vertical-align: middle; background-color: #fff; }}
             .n-day-box {{ font-size: 14px; font-weight: 500; color: #1d1d1f; width: 32px; height: 32px; line-height: 32px; margin: 0 auto; }}
@@ -2842,13 +2952,16 @@ def main_app_logic(user_id):
             .n-today {{ border: 1.5px solid #1d1d1f; border-radius: 50%; }}
             
             /* ドットコンテナ */
-            .n-dots {{ display: flex; justify-content: center; gap: 3px; margin-top: 2px; height: 5px; }}
-            .n-dot {{ width: 5px; height: 5px; border-radius: 50%; }}
+            .n-dots {{ display: flex; justify-content: center; align-items: center; gap: 3px; margin-top: 2px; flex-wrap: wrap; padding: 0 2px; }}
+            .n-dot {{ width: 7px; height: 7px; border-radius: 50%; margin: 1px 0; }}
             .n-red {{ background-color: #FF3B30; }}
             .n-blue {{ background-color: #007AFF; }}
+            /* 曜日の色付け */
+            .n-cal th:nth-child({sun_idx}), .n-cal td:nth-child({sun_idx}) {{ color: #FF3B30 !important; }}
+            .n-cal th:nth-child({sat_idx}), .n-cal td:nth-child({sat_idx}) {{ color: #007AFF !important; }}
         </style>
         <table class="n-cal">
-            <tr><th>月</th><th>火</th><th>水</th><th>木</th><th>金</th><th>土</th><th>日</th></tr>
+            <tr>{header_html}</tr>
         """
 
         for week in month_cal:
@@ -2864,17 +2977,16 @@ def main_app_logic(user_id):
                     # クラス設定とクリックイベント (Phase 2)
                     day_cls = "n-day-box"
                     click_js = ""
-                    if day > 0:
-                        day_str = f"{v_date.year}-{v_date.month:02d}-{day:02d}"
-                        click_js = f"onclick=\"window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + '?date={day_str}'\" style='cursor:pointer;'"
                     
                     if is_selected: day_cls += " n-selected"
                     elif is_today: day_cls += " n-today"
                     
-                    # ドット判定
+                    # ドット表示（件数分ループ）
                     dots_html = '<div class="n-dots">'
-                    if day in income_days: dots_html += '<div class="n-dot n-blue"></div>'
-                    if day in spent_days: dots_html += '<div class="n-dot n-red"></div>'
+                    for _ in range(income_counts.get(day, 0)):
+                        dots_html += '<div class="n-dot n-blue"></div>'
+                    for _ in range(spent_counts.get(day, 0)):
+                        dots_html += '<div class="n-dot n-red"></div>'
                     dots_html += '</div>'
 
                     html_body += f"""
@@ -2887,10 +2999,10 @@ def main_app_logic(user_id):
         html_body += "</table>"
         
         # 独立した窓として表示（高さを自動調整）
-        h_val = 300 if len(month_cal) <= 4 else (350 if len(month_cal) <= 5 else 400)
+        h_val = 320 if len(month_cal) <= 4 else (380 if len(month_cal) <= 5 else 450)
         components.html(html_body, height=h_val, scrolling=False)
         
-        st.markdown('<p style="font-size:12px; color:#8e8e93; margin-top:-10px;">※ 日付をクリックすると詳細を表示します。（URLが更新されます）</p>', unsafe_allow_html=True)
+        # (日付クリック表示の注釈を削除)
 
         st.markdown("---")
 
@@ -2899,6 +3011,13 @@ def main_app_logic(user_id):
         f_col1, f_col2 = st.columns(2)
         
         with f_col1:
+            # --- 新設：明細直上の日付選択ウィジェット ---
+            detail_date = st.date_input("📅 表示日を選択", value=s_date, key="date_selector_detail")
+            if detail_date != s_date:
+                st.session_state.selected_date = detail_date
+                st.session_state.view_date = detail_date.replace(day=1)
+                st.rerun()
+
             st.markdown(f"#### 🔎 {s_date.strftime('%m/%d')} の明細")
             if day_events.empty:
                 st.caption("この日の記録はありません。")
@@ -2944,16 +3063,16 @@ def main_app_logic(user_id):
             
             draft = st.session_state.draft_input
             
-            i_date = st.date_input("日付", value=s_date, key="qi_date")
-            if i_date != s_date:
-                st.session_state.selected_date = i_date
-                st.rerun()
+            i_date = st.date_input("日付", value=s_date, key="date_selector_input")
+            # 日付変更時にrerunしない（ボタンクリックが中断されるのを防止）
+            # i_date はそのまま登録データに使われる
                 
             i_type = st.radio("タイプ", ["支出", "収入"], horizontal=True, label_visibility="collapsed",
                               index=0 if draft.get('type', '支出') == '支出' else 1)
             
             # カテゴリ・性質の切替
             if i_type == "支出":
+                # プログラム固定ではなく、即座に変更が反映される session_state 側のリストを使用
                 i_cats = st.session_state.get('expense_categories', DEFAULT_EXPENSE_CATEGORIES)
                 i_tags = ["消費 (Need)", "投資 (Investment)", "浪費 (Want)"]
             else:
@@ -2961,7 +3080,7 @@ def main_app_logic(user_id):
                 i_tags = ["収入"]
                 
             cat_c, tag_c = st.columns(2)
-            i_cat = cat_c.selectbox("カテゴリ", i_cats, key="sel_cat")
+            i_cat = cat_c.selectbox("カテゴリ", i_cats, format_func=lambda x: UI_CAT_MAP.get(x, x), key="sel_cat")
             i_tag = tag_c.selectbox("性質", i_tags, key="sel_tag")
             
             i_amt = st.number_input("金額 (円)", min_value=0, step=1000, key="num_amt",
@@ -2986,27 +3105,25 @@ def main_app_logic(user_id):
                     except Exception:
                         pass  # テーブルが無くてもアプリは止めない
             
-            if st.button("🚀 登録", use_container_width=True, type="primary", key="btn_reg"):
+            if st.button("🚀 登録する", use_container_width=True, type="primary", key="btn_reg"):
                 if i_amt > 0:
+                    # ① 登録するデータを作る（これ"だけ"を行う）
                     new_rec = {
-                        "user_id": st.session_state.username,
                         "日付": i_date,
                         "タイプ": i_type,
                         "カテゴリー": i_cat,
                         "内容": i_memo if i_memo else "（未入力）",
                         "金額": i_amt,
-                        "性質": i_tag
+                        "性質": i_tag,
+                        "user_id": get_user_uuid(st.session_state.username)
                     }
-                    st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame([new_rec])], ignore_index=True)
-                    # 直近の選択を保存
+                    
+                    # 直近の選択を保存（UIの利便性用）
                     if i_type == "支出":
                         st.session_state.last_expense_cat = i_cat
                         st.session_state.last_expense_tag = i_tag
                     else:
                         st.session_state.last_income_cat = i_cat
-                    
-                    save_to_supabase(st.session_state.df, st.session_state.username)
-                    update_bs_from_transactions([new_rec], st.session_state.username)
                     
                     # 登録完了後、下書きをクリア
                     st.session_state.draft_input = {'amount': 0, 'memo': '', 'type': '支出'}
@@ -3017,24 +3134,50 @@ def main_app_logic(user_id):
                         except Exception:
                             pass
                     
-                    st.toast("✅ 登録しました！")
-                    st.rerun()
+                    # selected_date と view_date を入力日付に同期
+                    st.session_state.selected_date = i_date
+                    st.session_state.view_date = i_date.replace(day=1)
+                    
+                    # ② 共通関数に丸投げ（これ以外の保存・更新処理はここに書かない！）
+                    finalize_registration([new_rec], "✅ 収支を登録しました！")
                 else:
                     st.error("金額を入力してください")
 
         # --- 5. 【管理統合】サマリー ＆ データ編集 ＆ CSV ---
         st.markdown('<div class="section-header">💾 データ管理 ＆ 一括編集</div>', unsafe_allow_html=True)
         
-        # サマリー
+        # サマリー（選択中の月のみ集計）
+        s_date = st.session_state.selected_date
+        if not st.session_state.df.empty and "日付" in st.session_state.df.columns:
+            _df_summary = st.session_state.df.copy()
+            _df_summary["日付"] = pd.to_datetime(_df_summary["日付"]).dt.date
+            _month_mask = _df_summary["日付"].apply(lambda x: x.year == s_date.year and x.month == s_date.month)
+            _month_df = _df_summary[_month_mask]
+            _month_income = _month_df[_month_df["タイプ"] == "収入"]["金額"].sum() if not _month_df.empty else 0
+            _month_expense = _month_df[_month_df["タイプ"] == "支出"]["金額"].sum() if not _month_df.empty else 0
+        else:
+            _month_income = 0
+            _month_expense = 0
+        
         s1, s2, s3 = st.columns(3)
-        s1.metric("総レコード", f"{len(st.session_state.df)}件")
-        s2.metric(f"累計{get_label('income')}", f"{total_income_all:,.0f}円")
-        s3.metric(f"累計{get_label('expense')}", f"{total_expense:,.0f}円", delta_color="inverse")
+        s1.metric(f"{s_date.year}/{s_date.month}月レコード", f"{len(_month_df) if not st.session_state.df.empty else 0}件")
+        s2.metric(f"今月{get_label('income')}", f"{_month_income:,.0f}円")
+        s3.metric(f"今月{get_label('expense')}", f"{_month_expense:,.0f}円", delta_color="inverse")
 
         # データ管理テーブル
         h_df = st.session_state.df.copy()
         if not h_df.empty:
+            # ユーザーに不要な内部カラムを非表示
+            hidden_cols = ["user_id", "username", "id", "created_at", "updated_at"]
+            h_df = h_df.drop(columns=[c for c in hidden_cols if c in h_df.columns], errors='ignore')
+            # 表示用に絵文字を付与
+            h_df["タイプ"] = h_df["タイプ"].map(UI_TYPE_MAP).fillna(h_df["タイプ"])
+            h_df["カテゴリー"] = h_df["カテゴリー"].map(UI_CAT_MAP).fillna(h_df["カテゴリー"])
             h_df.insert(0, "🗑️ 選択", False)
+            
+            disp_ecats = [UI_CAT_MAP.get(c, c) for c in EXPENSE_CATEGORIES]
+            disp_icats = [UI_CAT_MAP.get(c, c) for c in INCOME_CATEGORIES]
+
             e_df = st.data_editor(
                 h_df,
                 use_container_width=True,
@@ -3042,14 +3185,63 @@ def main_app_logic(user_id):
                 column_config={
                     "🗑️ 選択": st.column_config.CheckboxColumn("🗑️", default=False),
                     "日付": st.column_config.DateColumn("日付", required=True),
-                    "タイプ": st.column_config.SelectboxColumn("タイプ", options=["支出", "収入"], required=True),
-                    "カテゴリー": st.column_config.SelectboxColumn("カテゴリー", options=EXPENSE_CATEGORIES + INCOME_CATEGORIES, required=True),
+                    "タイプ": st.column_config.SelectboxColumn("タイプ", options=list(UI_TYPE_MAP.values()), required=True),
+                    "カテゴリー": st.column_config.SelectboxColumn("カテゴリー", options=disp_ecats + disp_icats, required=True),
                     "性質": st.column_config.SelectboxColumn("性質", options=CONSUMPTION_TAGS + ["収入"], required=True),
-                    "金額": st.column_config.NumberColumn("金額", format="%d", min_value=0),
+                    "金額": st.column_config.NumberColumn("金額", format="¥%d", min_value=0),
                 },
                 key="editor_integrated"
             )
-            manage_data_ui(e_df, st.session_state.df, "df", "df_backup", save_to_supabase, ["日付", "カテゴリー", "金額"])
+            
+            # DB保存用に元の文字列へ戻す
+            save_df = e_df.copy()
+            save_df["タイプ"] = save_df["タイプ"].map(UI_TYPE_REV).fillna(save_df["タイプ"])
+            save_df["カテゴリー"] = save_df["カテゴリー"].map(UI_CAT_REV).fillna(save_df["カテゴリー"])
+            
+            manage_data_ui(save_df, st.session_state.df, "df", "df_backup", save_to_supabase, ["日付", "カテゴリー", "金額"])
+
+        # --- メンテナンス：全データ削除ボタン ---
+        with st.expander("🛠️ メンテナンス（全データ削除）", expanded=False):
+            st.warning("⚠️ この操作は元に戻せません。テスト用の重複データが溜まった場合にのみ使用してください。")
+            if st.button("🗑️ 全取引データを削除する", key="btn_purge_all", type="primary"):
+                try:
+                    # ① DBから全データ削除
+                    if supabase:
+                        user_uuid = get_user_uuid(st.session_state.username)
+                        supabase.table("transactions").delete().eq("user_id", user_uuid).execute()
+                        import time
+                        time.sleep(0.5)  # 削除の反映を待つ
+                    
+                    # ② 認証等の必要情報を退避
+                    _username = st.session_state.get("username")
+                    _name = st.session_state.get("name")
+                    _auth = st.session_state.get("authentication_status")
+                    
+                    # ③ セッション状態の完全クリア
+                    st.session_state.clear()
+                    
+                    # ④ 必要な内部状態を復元・再初期化（真っ新な状態）
+                    st.session_state.username = _username
+                    st.session_state.name = _name
+                    st.session_state.authentication_status = _auth
+                    st.session_state.df = pd.DataFrame(columns=["user_id", "日付", "タイプ", "カテゴリー", "内容", "金額", "性質"])
+                    st.session_state.assets_df = pd.DataFrame()
+                    st.session_state.selected_date = datetime.date.today()
+                    st.session_state.view_date = datetime.date.today().replace(day=1)
+                    st.session_state.business_type = "個人"
+                    st.session_state.expense_categories = DEFAULT_EXPENSE_CATEGORIES
+                    
+                    # ⑤ キャッシュ完全破棄
+                    load_data.clear()
+                    if 'load_assets_data' in globals():
+                        load_assets_data.clear()
+                    
+                    st.toast("🗑️ 全データを削除しました。画面をリセットします。")
+                    
+                    # ⑥ 強制リラン (画面を0にリセット)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"削除に失敗しました: {e}")
 
         def apply_smart_labeling(import_df, history_df):
             """過去の入力履歴（内容とカテゴリーの対応）を元に、CSVインポートデータのカテゴリーを自動推測する"""
@@ -3140,21 +3332,34 @@ def main_app_logic(user_id):
                                 final_import = final_import.drop(columns=["状態"])
                                 
                             if not final_import.empty:
-                                st.session_state.df = pd.concat([st.session_state.df, final_import], ignore_index=True)
-                                save_to_supabase(st.session_state.df, st.session_state.username)
-                                update_bs_from_transactions(final_import.to_dict("records"), st.session_state.username)
-                                st.success(f"{len(final_import)} 件のインポートが完了しました！")
+                                # プレビューDFをクリアしてから共通関数に投げる
+                                del st.session_state.import_preview_df
+                                finalize_registration(final_import, f"✅ {len(final_import)} 件のインポートが完了しました！")
                             else:
                                 st.warning("インポートするデータがありませんでした（すべてスキップされました）。")
-                                
-                            del st.session_state.import_preview_df
-                            st.rerun()
+                                del st.session_state.import_preview_df
+                                st.rerun()
                 except Exception as e: 
                     st.error(f"🚨 プレビュー処理エラー: CSVファイルの形式や文字コードを確認してください。詳細: {e}")
 
 
     with tab_settings:
         st.header("⚙️ アプリケーション設定")
+        
+        # --- カレンダー表示設定 ---
+        st.subheader("🗓️ カレンダー表示設定")
+        new_start_weekday = st.radio(
+            "週の開始曜日",
+            ["月曜日", "日曜日"],
+            index=0 if st.session_state.start_weekday == "月曜日" else 1,
+            horizontal=True,
+            help="カレンダーを月曜日から始めるか、日曜日から始めるかを選択します。"
+        )
+        if new_start_weekday != st.session_state.start_weekday:
+            st.session_state.start_weekday = new_start_weekday
+            st.rerun()
+
+        st.divider()
         
         # 2.1 支出カテゴリーの管理（新規追加機能！）
         render_category_management()
@@ -3171,20 +3376,30 @@ def main_app_logic(user_id):
         # 編集可能なテンプレートプレビューと登録ボタン
         with st.expander(f"📝 テンプレート確認・編集（合計 ¥{total_fixed:,}）", expanded=False):
             template_df = pd.DataFrame(template_to_use)
+            if not template_df.empty and "カテゴリー" in template_df.columns:
+                template_df["カテゴリー"] = template_df["カテゴリー"].map(UI_CAT_MAP).fillna(template_df["カテゴリー"])
+            
+            disp_ecats = [UI_CAT_MAP.get(c, c) for c in EXPENSE_CATEGORIES]
+            
             edited_template = st.data_editor(
                 template_df,
                 use_container_width=True,
                 num_rows="dynamic",
                 column_config={
-                    "カテゴリー": st.column_config.SelectboxColumn("カテゴリー", options=EXPENSE_CATEGORIES),
+                    "カテゴリー": st.column_config.SelectboxColumn("カテゴリー", options=disp_ecats),
                     "内容": st.column_config.TextColumn("内容"),
-                    "金額": st.column_config.NumberColumn("金額 (円)", min_value=0, step=1000, format="%d"),
+                    "金額": st.column_config.NumberColumn("金額 (円)", min_value=0, step=1000, format="¥%d"),
                 },
                 key="fixed_cost_editor"
             )
-            # 編集結果をテンプレートに反映
-            if not edited_template.equals(template_df):
-                st.session_state.fixed_costs = edited_template.to_dict('records')
+            
+            # 編集結果を文字に戻してテンプレートに反映
+            save_template = edited_template.copy()
+            if not save_template.empty and "カテゴリー" in save_template.columns:
+                save_template["カテゴリー"] = save_template["カテゴリー"].map(UI_CAT_REV).fillna(save_template["カテゴリー"])
+            
+            if save_template.to_dict('records') != template_to_use:
+                st.session_state.fixed_costs = save_template.to_dict('records')
                 template_to_use = st.session_state.fixed_costs
 
         fc_col1, fc_col2 = st.columns(2)
@@ -3193,17 +3408,12 @@ def main_app_logic(user_id):
                 try:
                     added_rows, skipped_items = register_fixed_costs(st.session_state.df, template_to_use, st.session_state["username"])
                     if added_rows:
-                        st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(added_rows)], ignore_index=True)
-                        save_data(st.session_state.df, st.session_state["username"])
-                        # ===== BS側への連動更新 =====
-                        update_bs_from_transactions(added_rows, st.session_state["username"])
-                        
-                        st.success(f"✅ {len(added_rows)} 件登録完了！")
+                        skip_msg = f"（{len(skipped_items)} 件スキップ）" if skipped_items else ""
+                        finalize_registration(added_rows, f"✅ {len(added_rows)} 件の固定費を登録しました！{skip_msg}")
                     else:
                         st.info("💡 全ての固定費が登録済みです。")
-                    if skipped_items:
-                        st.warning(f"⚠️ {len(skipped_items)} 件スキップ（登録済）: {', '.join(skipped_items[:3])}{'...' if len(skipped_items) > 3 else ''}")
-                    if added_rows: st.rerun()
+                        if skipped_items:
+                            st.warning(f"⚠️ {len(skipped_items)} 件スキップ（登録済）: {', '.join(skipped_items[:3])}{'...' if len(skipped_items) > 3 else ''}")
                 except Exception as e:
                     st.error(f"⚠️ 固定費の一括登録に失敗しました: {e}")
         with fc_col2:
@@ -3211,15 +3421,11 @@ def main_app_logic(user_id):
                 try:
                     added_rows, skipped_items = register_fixed_costs_from_prev_month(st.session_state.df, st.session_state["username"], datetime.date.today())
                     if added_rows:
-                        st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(added_rows)], ignore_index=True)
-                        save_data(st.session_state.df, st.session_state["username"])
-                        # ===== BS側への連動更新 =====
-                        update_bs_from_transactions(added_rows, st.session_state["username"])
-                        
-                        st.success(f"✅ {len(added_rows)} 件をコピーしました！")
-                    if skipped_items:
-                        st.info(f"💡 {len(skipped_items)} 件は既に今月に存在するためスキップしました。")
-                    if added_rows: st.rerun()
+                        skip_msg = f"（{len(skipped_items)} 件スキップ）" if skipped_items else ""
+                        finalize_registration(added_rows, f"✅ {len(added_rows)} 件を前月からコピーしました！{skip_msg}")
+                    else:
+                        if skipped_items:
+                            st.info(f"💡 {len(skipped_items)} 件は既に今月に存在するためスキップしました。")
                 except Exception as e:
                     st.error(f"⚠️ 前月コピーに失敗しました: {e}")
 
